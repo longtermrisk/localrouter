@@ -1,0 +1,42 @@
+[project]
+name = "localrouter"
+version = "0.1.0"
+description = "Multi-provider LLM client with unified message format and tool support"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+    {name = "Center on Long-term Risk"}
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+
+dependencies = [
+    "anthropic>=0.50.0",
+    "backoff>=2.2.1", 
+    "openai>=1.98.0",
+    "pydantic>=2.7.0",
+    "python-dotenv>=1.0.0",
+    "pyyaml>=6.0.2",
+    "cache_on_disk>=0.4.0"
+]
+
+[project.optional-dependencies]
+google = ["google-genai>=1.26.0"]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["localrouter*"]
