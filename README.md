@@ -5,6 +5,11 @@ A unified multi-provider LLM client with consistent message formats and tool sup
 
 ## Quick Start
 
+Install the package:
+```bash
+pip install localrouter
+```
+
 Set your API keys as environment variables:
 ```bash
 export OPENAI_API_KEY="your-openai-key"
