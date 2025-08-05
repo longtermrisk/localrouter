@@ -399,7 +399,9 @@ async def test_cached_functionality():
             print(
                 f"  First call: {first_call_time:.2f}s, Second call: {second_call_time:.2f}s"
             )
-            print(f"  Responses match: {response1.content[0].text == response2.content[0].text}")
+            print(
+                f"  Responses match: {response1.content[0].text == response2.content[0].text}"
+            )
 
         except Exception as e:
             print(f"{provider} ({model_name}) cached error: {e}")
@@ -456,7 +458,9 @@ async def test_cached_with_backoff_functionality():
             print(
                 f"  First call: {first_call_time:.2f}s, Second call: {second_call_time:.2f}s"
             )
-            print(f"  Responses match: {response1.content[0].text == response2.content[0].text}")
+            print(
+                f"  Responses match: {response1.content[0].text == response2.content[0].text}"
+            )
 
         except Exception as e:
             print(f"{provider} ({model_name}) cached+backoff error: {e}")
@@ -470,7 +474,9 @@ async def test_cached_with_structured_output():
         ChatMessage(
             role=MessageRole.user,
             content=[
-                TextBlock(text="Create an event for a team meeting on Monday with John and Sarah.")
+                TextBlock(
+                    text="Create an event for a team meeting on Monday with John and Sarah."
+                )
             ],
         )
     ]
@@ -507,7 +513,9 @@ async def test_cached_with_structured_output():
             print(f"{provider} ({model_name}) cached structured response:")
             if hasattr(response1, "parsed") and response1.parsed:
                 print(f"  Parsed event: {response1.parsed}")
-            print(f"  Responses match: {str(response1.content) == str(response2.content)}")
+            print(
+                f"  Responses match: {str(response1.content) == str(response2.content)}"
+            )
 
         except NotImplementedError as e:
             print(f"{provider} ({model_name}) cached structured (expected): {e}")
@@ -568,7 +576,9 @@ async def test_cached_with_tools():
             print(
                 f"  First call: {first_call_time:.2f}s, Second call: {second_call_time:.2f}s"
             )
-            print(f"  Responses match: {str(response1.content) == str(response2.content)}")
+            print(
+                f"  Responses match: {str(response1.content) == str(response2.content)}"
+            )
 
         except Exception as e:
             print(f"{provider} ({model_name}) cached tools error: {e}")
@@ -633,7 +643,9 @@ async def test_cache_seed_isolation():
             print(f"  Seed 1 again: {response3.content[0].text[:50]}...")
             print(f"  Second call (different seed) took: {second_call_time:.2f}s")
             print(f"  Third call (same seed as first) took: {third_call_time:.2f}s")
-            print(f"  Seed 1 responses match: {response1.content[0].text == response3.content[0].text}")
+            print(
+                f"  Seed 1 responses match: {response1.content[0].text == response3.content[0].text}"
+            )
 
         except Exception as e:
             print(f"{provider} ({model_name}) cache seed isolation error: {e}")
@@ -681,8 +693,12 @@ async def test_cache_seed_optional_behavior():
         print(f"{provider} ({model_name}) no cache_seed behavior:")
         print(f"  Response 1: {response1.content[0].text}")
         print(f"  Response 2: {response2.content[0].text}")
-        print(f"  First call: {first_call_time:.2f}s, Second call: {second_call_time:.2f}s")
-        print(f"  Both calls took similar time (no caching): {abs(first_call_time - second_call_time) < 2.0}")
+        print(
+            f"  First call: {first_call_time:.2f}s, Second call: {second_call_time:.2f}s"
+        )
+        print(
+            f"  Both calls took similar time (no caching): {abs(first_call_time - second_call_time) < 2.0}"
+        )
 
     except Exception as e:
         print(f"{provider} ({model_name}) no cache_seed error: {e}")
@@ -724,7 +740,7 @@ async def main():
     await test_image_input()
     await test_multimodal_with_tools()
     await test_conversation_flow()
-    
+
     # New tests for cached and backoff functionality
     await test_backoff_functionality()
     await test_cached_functionality()
