@@ -45,7 +45,7 @@ asyncio.run(main())
 LocalRouter provides several variants of `get_response` for different use cases:
 
 ### Caching
-Cache responses to disk for faster repeated calls:
+To use disk caching, `import get_response_cached as get_response`:
 ```python
 # Import as get_response for consistent usage
 from localrouter import get_response_cached as get_response
@@ -56,6 +56,7 @@ response = await get_response(
     cache_seed=12345  # Required for caching
 )
 ```
+This will return cached results whenever get_response is called with identical inputs and `cache_seed` is provided. If no `cache_seed` is provided, it will behave exactly like `localrouter.get_response`.
 
 ### Retry with Backoff
 Automatically retry failed requests with exponential backoff:
@@ -197,3 +198,46 @@ final_response = await get_response(model="gpt-4o-mini", messages=messages, tool
 
 - `ToolDefinition(name, description, input_schema)` - Define available tools
 - `SubagentToolDefinition()` - Predefined tool for sub-agents
+
+## Reasoning/Thinking Support
+
+Configure reasoning budgets for models that support explicit thinking (GPT-5, Claude Sonnet 4+, Gemini 2.5):
+
+```python
+from localrouter import ReasoningConfig
+
+# Using effort levels (OpenAI-style)
+response = await get_response(
+    model="gpt-5",  # When available
+    messages=messages,
+    reasoning=ReasoningConfig(effort="high")  # "minimal", "low", "medium", "high"
+)
+
+# Using explicit token budget (Anthropic/Gemini-style)
+response = await get_response(
+    model="gemini-2.5-pro",
+    messages=messages,
+    reasoning=ReasoningConfig(budget_tokens=8000)
+)
+
+# Let model decide (Gemini dynamic thinking)
+response = await get_response(
+    model="gemini-2.5-flash",
+    messages=messages,
+    reasoning=ReasoningConfig(dynamic=True)
+)
+
+# Backward compatible dict config
+response = await get_response(
+    model="claude-sonnet-4-20250514",  # When available
+    messages=messages,
+    reasoning={"effort": "medium"}
+)
+```
+
+The reasoning configuration automatically converts between provider formats:
+- **OpenAI (GPT-5)**: Uses `effort` levels
+- **Anthropic (Claude 4+)**: Uses `budget_tokens` 
+- **Google (Gemini 2.5)**: Uses `thinking_budget` with dynamic option
+
+Models that don't support reasoning will ignore the configuration.

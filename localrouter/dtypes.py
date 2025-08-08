@@ -11,6 +11,113 @@ from .utils import dict_recursive
 from .xml_utils import dump_xml, get_first_element, parse_xml
 
 
+class ReasoningConfig(BaseModel):
+    """Configuration for reasoning/thinking in LLMs.
+
+    Can be specified either as:
+    - effort: "minimal"/"low"/"medium"/"high" (OpenAI-style)
+    - budget_tokens: int (Anthropic/Gemini-style explicit token count)
+    - dynamic: bool (Gemini-style, let model decide)
+    """
+
+    effort: Optional[str] = None  # "minimal", "low", "medium", "high"
+    budget_tokens: Optional[int] = None
+    dynamic: Optional[bool] = None
+
+    @field_validator("effort")
+    @classmethod
+    def validate_effort(cls, v):
+        if v is not None and v not in ["minimal", "low", "medium", "high"]:
+            raise ValueError(
+                f"Invalid effort level: {v}. Must be one of: minimal, low, medium, high"
+            )
+        return v
+
+    def to_openai_format(self, model: str) -> Optional[Dict[str, Any]]:
+        """Convert to OpenAI reasoning format if applicable."""
+        # GPT-5 uses reasoning.effort
+        if model and model.startswith("gpt-5"):
+            if self.effort:
+                return {"effort": self.effort}
+            elif self.budget_tokens:
+                # Convert token budget to effort level
+                if self.budget_tokens <= 2000:
+                    return {"effort": "minimal"}
+                elif self.budget_tokens <= 8000:
+                    return {"effort": "medium"}
+                else:
+                    return {"effort": "high"}
+            elif self.dynamic:
+                return {"effort": "medium"}  # Default for dynamic
+        # Other OpenAI models don't support reasoning
+        return None
+
+    def to_anthropic_format(self, model: str) -> Optional[Dict[str, Any]]:
+        """Convert to Anthropic thinking format if applicable."""
+        # Only claude-sonnet-4-20250514 and newer support thinking
+        if model and "claude-sonnet-4" in model:
+            if self.budget_tokens:
+                return {"type": "enabled", "budget_tokens": self.budget_tokens}
+            elif self.effort:
+                # Convert effort to token budget
+                budget_map = {
+                    "minimal": 1000,
+                    "low": 2000,
+                    "medium": 8000,
+                    "high": 16000,
+                }
+                return {
+                    "type": "enabled",
+                    "budget_tokens": budget_map.get(self.effort, 8000),
+                }
+            elif self.dynamic:
+                # Use a reasonable default for dynamic
+                return {"type": "enabled", "budget_tokens": 8000}
+        return None
+
+    def to_gemini_format(self, model: str) -> Optional[Dict[str, Any]]:
+        """Convert to Gemini thinking format if applicable."""
+        # Gemini 2.5 models support thinking
+        if model and ("gemini-2.5" in model or "gemini-2-5" in model):
+            if self.dynamic:
+                return {"thinking_budget": -1}
+            elif self.budget_tokens:
+                return {"thinking_budget": self.budget_tokens}
+            elif self.effort:
+                # Convert effort to token budget
+                budget_map = {
+                    "minimal": 1000,
+                    "low": 2000,
+                    "medium": 8000,
+                    "high": 16000,
+                }
+                return {"thinking_budget": budget_map.get(self.effort, 8000)}
+        return None
+
+
+class ThinkingBlock(BaseModel):
+    """Represents a thinking/reasoning block from the model's response."""
+
+    thinking: str
+    type: str = "thinking"
+    meta: Dict[str, Any] = Field(default_factory=dict)
+
+    def anthropic_format(self) -> Dict[str, Any]:
+        # Convert to empty text block with metadata for user visibility
+        return {
+            "type": "text",
+            "text": "",  # Empty text as thinking is internal
+            "meta": {"user_sees": self.thinking},
+        }
+
+    def openai_format(self) -> Dict[str, Any]:
+        # OpenAI doesn't expose thinking blocks in responses
+        return {"type": "text", "text": ""}
+
+    def xml_format(self) -> Dict[str, Any]:
+        return {"type": "text", "text": f"<thinking>{self.thinking}</thinking>"}
+
+
 class ToolDefinition(BaseModel):
     """Class for structured JSON response format that can be used as a tool for judges
 
@@ -207,7 +314,9 @@ class ToolResultBlock(BaseModel):
         return dict(type="text", text=dump_xml(tool_result=dict(output=output)))
 
 
-ContentBlock = Union[TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock]
+ContentBlock = Union[
+    TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock
+]
 
 
 class ChatMessage(BaseModel):
@@ -381,6 +490,9 @@ class ChatMessage(BaseModel):
                 blocks.append(
                     ToolUseBlock(id=item.id, name=item.name, input=item.input)
                 )
+            elif item.type == "thinking":
+                # Convert thinking block to empty text with metadata
+                blocks.append(TextBlock(text="", meta={"user_sees": item.thinking}))
             else:
                 raise ValueError(f"Unknown block type: {item.type}")
 
@@ -391,7 +503,19 @@ class ChatMessage(BaseModel):
         """Convert Google GenAI response to ChatMessage"""
         blocks = []
 
-        if response.text:
+        # Check for thought summaries in candidates
+        if hasattr(response, "candidates") and response.candidates:
+            candidate = response.candidates[0]
+            if hasattr(candidate, "content") and hasattr(candidate.content, "parts"):
+                for part in candidate.content.parts:
+                    if hasattr(part, "thought") and part.thought:
+                        # This is a thought summary - add as empty text with metadata
+                        blocks.append(TextBlock(text="", meta={"user_sees": part.text}))
+                    elif hasattr(part, "text") and part.text:
+                        blocks.append(TextBlock(text=part.text))
+
+        # Fallback to simple text if no parts found
+        if not blocks and response.text:
             blocks.append(TextBlock(text=response.text))
 
         # Handle function calls
@@ -572,7 +696,7 @@ class PromptTemplate(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-def anthropic_format(messages, tools, **kwargs) -> Dict[str, Any]:
+def anthropic_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any]:
     """Convert our internal chat representation into a payload suitable for Anthropic."""
     system_message = None
     chat_messages = []
@@ -594,10 +718,18 @@ def anthropic_format(messages, tools, **kwargs) -> Dict[str, Any]:
         kwargs["tools"] = [tool.anthropic_format for tool in tools]
     if system_message:
         kwargs["system"] = system_message
+
+    # Handle reasoning/thinking configuration
+    if reasoning and isinstance(reasoning, ReasoningConfig):
+        model = kwargs.get("model", "")
+        thinking_config = reasoning.to_anthropic_format(model)
+        if thinking_config:
+            kwargs["thinking"] = thinking_config
+
     return kwargs
 
 
-def openai_format(messages, tools, **kwargs) -> Dict[str, Any]:
+def openai_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any]:
     """Convert our internal chat representation into a payload suitable for OpenAI."""
     oai_messages = []
 
@@ -614,15 +746,22 @@ def openai_format(messages, tools, **kwargs) -> Dict[str, Any]:
         kwargs["tools"] = [t.openai_format for t in tools]
 
     # Special treatments for reasoning models
-    if kwargs.get("model", "").startswith("o"):
+    model = kwargs.get("model", "")
+    if model.startswith("o") or model.startswith("gpt-5"):
         if "max_tokens" in kwargs:
             kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
         kwargs.pop("temperature", None)
 
+    # Handle reasoning configuration for GPT-5
+    if reasoning and isinstance(reasoning, ReasoningConfig):
+        reasoning_config = reasoning.to_openai_format(model)
+        if reasoning_config:
+            kwargs["reasoning"] = reasoning_config
+
     return kwargs
 
 
-def genai_format(messages, tools, **kwargs) -> Dict[str, Any]:
+def genai_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any]:
     """Convert our internal chat representation into a payload suitable for Google GenAI."""
     try:
         from google.genai import types as genai_types
@@ -714,6 +853,13 @@ def genai_format(messages, tools, **kwargs) -> Dict[str, Any]:
             )
             genai_tools.append(genai_types.Tool(function_declarations=[func_decl]))
         request["tools"] = genai_tools
+
+    # Handle reasoning/thinking configuration
+    if reasoning and isinstance(reasoning, ReasoningConfig):
+        model = kwargs.get("model", "gemini-2.5-pro")
+        thinking_config = reasoning.to_gemini_format(model)
+        if thinking_config:
+            request["thinking_budget"] = thinking_config["thinking_budget"]
 
     return request
 

@@ -16,6 +16,8 @@ from .dtypes import (
     genai_format,
     TextBlock,
     ToolDefinition,
+    ReasoningConfig,
+    ThinkingBlock,
 )
 
 from dotenv import load_dotenv
@@ -40,6 +42,7 @@ async def get_response_anthropic(
     messages: List[ChatMessage],
     tools: Optional[List[ToolDefinition]],
     response_format: Optional[Dict[str, Any]] = None,
+    reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
     **kwargs: Any,
 ) -> ChatMessage:
     if response_format is not None:
@@ -47,7 +50,7 @@ async def get_response_anthropic(
             "Structured output is not supported for Anthropic models"
         )
 
-    kwargs = anthropic_format(messages, tools, **kwargs)
+    kwargs = anthropic_format(messages, tools, reasoning=reasoning, **kwargs)
     kwargs["timeout"] = 599
     resp = await anthr.messages.create(**kwargs)
 
@@ -64,9 +67,10 @@ def get_response_factory(oai: openai.AsyncOpenAI) -> Callable[..., Any]:
         messages: List[ChatMessage],
         tools: Optional[List[ToolDefinition]],
         response_format: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
+        reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
         **kwargs: Any,
     ) -> ChatMessage:
-        kwargs = openai_format(messages, tools, **kwargs)
+        kwargs = openai_format(messages, tools, reasoning=reasoning, **kwargs)
 
         if "model" not in kwargs:
             raise ValueError("'model' is required for OpenAI completions")
@@ -103,6 +107,7 @@ async def get_response_genai(
     messages: List[ChatMessage],
     tools: Optional[List[ToolDefinition]],
     response_format: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
+    reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
     **kwargs: Any,
 ) -> ChatMessage:
     try:
@@ -120,12 +125,18 @@ async def get_response_genai(
         )
 
     client = genai.Client(api_key=api_key)
-    request_kwargs = genai_format(messages, tools)
+    request_kwargs = genai_format(messages, tools, reasoning=reasoning)
 
     # Build config
     config_params: Dict[str, Any] = {}
     for k, v in kwargs.items():
-        if k not in ["contents", "tools", "system_instruction", "model"]:
+        if k not in [
+            "contents",
+            "tools",
+            "system_instruction",
+            "model",
+            "thinking_budget",
+        ]:
             if k == "max_tokens":
                 config_params["max_output_tokens"] = v
             elif k in ["temperature", "top_p"]:
@@ -149,6 +160,13 @@ async def get_response_genai(
         config_params["tools"] = request_kwargs["tools"]
     if "system_instruction" in request_kwargs and request_kwargs["system_instruction"]:
         config_params["system_instruction"] = request_kwargs["system_instruction"]
+
+    # Handle thinking budget
+    if "thinking_budget" in request_kwargs:
+        config_params["thinking_config"] = genai_types.ThinkingConfig(
+            thinking_budget=request_kwargs["thinking_budget"],
+            include_thoughts=True,  # Include thought summaries
+        )
 
     config = (
         genai_types.GenerateContentConfig(**config_params) if config_params else None
@@ -246,8 +264,13 @@ async def get_response(
     messages: List[ChatMessage],
     tools: Optional[List[ToolDefinition]] = None,
     response_format: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
+    reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
     **kwargs: Any,
 ) -> ChatMessage:
+    # Convert dict to ReasoningConfig if needed (centralized conversion)
+    if reasoning and isinstance(reasoning, dict):
+        reasoning = ReasoningConfig(**reasoning)
+
     all_models = []
     for provider in providers:
         all_models.extend(provider.models)
@@ -257,6 +280,7 @@ async def get_response(
                 messages=messages,
                 tools=tools,
                 response_format=response_format,
+                reasoning=reasoning,
                 **kwargs,
             )
 
@@ -273,6 +297,7 @@ async def get_response(
                     messages=messages,
                     tools=tools,
                     response_format=response_format,
+                    reasoning=reasoning,
                     **kwargs,
                 )
 
@@ -306,6 +331,7 @@ async def get_response_with_backoff(
     messages: List[ChatMessage],
     tools: Optional[List[ToolDefinition]] = None,
     response_format: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
+    reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
     **kwargs: Any,
 ) -> ChatMessage:
     """Get a response from an LLM with exponential backoff retry logic for various API errors.
@@ -315,6 +341,7 @@ async def get_response_with_backoff(
         messages (List[ChatMessage]): The conversation history
         tools (Optional[List[ToolDefinition]]): Optional list of tools/functions the model can use
         response_format (Optional[Dict]): Optional response format specification
+        reasoning (Optional[Union[ReasoningConfig, Dict]]): Optional reasoning/thinking configuration
         **kwargs: Additional keyword arguments passed to the underlying API
 
     Returns:
@@ -323,8 +350,17 @@ async def get_response_with_backoff(
     Raises:
         ValueError: If the specified model is not supported by any provider
     """
+    # Convert dict to ReasoningConfig if needed
+    if reasoning and isinstance(reasoning, dict):
+        reasoning = ReasoningConfig(**reasoning)
+
     return await get_response(
-        model, messages, tools=tools, response_format=response_format, **kwargs
+        model,
+        messages,
+        tools=tools,
+        response_format=response_format,
+        reasoning=reasoning,
+        **kwargs,
     )
 
 
@@ -337,6 +373,7 @@ async def get_response_cached(
     messages: List[ChatMessage],
     tools: Optional[List[ToolDefinition]] = None,
     response_format: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
+    reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
     cache_seed: Optional[int] = None,
     **kwargs: Any,
 ) -> ChatMessage:
@@ -347,6 +384,7 @@ async def get_response_cached(
         messages (List[ChatMessage]): The conversation history
         tools (Optional[List[ToolDefinition]]): Optional list of tools/functions the model can use
         response_format (Optional[Dict]): Optional response format specification
+        reasoning (Optional[Union[ReasoningConfig, Dict]]): Optional reasoning/thinking configuration
         cache_seed (int): if set, use cached responses
         **kwargs: Additional keyword arguments passed to the underlying API
 
@@ -356,11 +394,16 @@ async def get_response_cached(
     Raises:
         ValueError: If the specified model is not supported by any provider
     """
+    # Convert dict to ReasoningConfig if needed
+    if reasoning and isinstance(reasoning, dict):
+        reasoning = ReasoningConfig(**reasoning)
+
     return await get_response(
         model,
         messages,
         tools=tools,
         response_format=response_format,
+        reasoning=reasoning,
         **kwargs,
     )
 
@@ -371,6 +414,7 @@ async def get_response_cached_with_backoff(
     messages: List[ChatMessage],
     tools: Optional[List[ToolDefinition]] = None,
     response_format: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
+    reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
     cache_seed: Optional[int] = None,
     **kwargs: Any,
 ) -> ChatMessage:
@@ -381,6 +425,7 @@ async def get_response_cached_with_backoff(
         messages (List[ChatMessage]): The conversation history
         tools (Optional[List[ToolDefinition]]): Optional list of tools/functions the model can use
         response_format (Optional[Dict]): Optional response format specification
+        reasoning (Optional[Union[ReasoningConfig, Dict]]): Optional reasoning/thinking configuration
         cache_seed (int): if set, use cached responses
         **kwargs: Additional keyword arguments passed to the underlying API
 
@@ -390,10 +435,15 @@ async def get_response_cached_with_backoff(
     Raises:
         ValueError: If the specified model is not supported by any provider
     """
+    # Convert dict to ReasoningConfig if needed
+    if reasoning and isinstance(reasoning, dict):
+        reasoning = ReasoningConfig(**reasoning)
+
     return await get_response_with_backoff(
         model,
         messages,
         tools=tools,
         response_format=response_format,
+        reasoning=reasoning,
         **kwargs,
     )
