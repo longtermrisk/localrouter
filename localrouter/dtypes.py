@@ -6,6 +6,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator
 import yaml
+import logging
 
 from .utils import dict_recursive
 from .xml_utils import dump_xml, get_first_element, parse_xml
@@ -106,8 +107,7 @@ class ThinkingBlock(BaseModel):
         # Convert to empty text block with metadata for user visibility
         return {
             "type": "text",
-            "text": "",  # Empty text as thinking is internal
-            "meta": {"user_sees": self.thinking},
+            "text": "",
         }
 
     def openai_format(self) -> Dict[str, Any]:
@@ -342,7 +342,11 @@ class ChatMessage(BaseModel):
         if isinstance(self.content, str):
             return {"role": self.role.value, "content": self.content}
 
-        content = [c.anthropic_format() for c in self.content]
+        content = [
+            c.anthropic_format()
+            for c in self.content
+            if not isinstance(c, ThinkingBlock)
+        ]
         return {"role": self.role.value, "content": content}
 
     def openai_format(self) -> Dict[str, Any]:
@@ -356,6 +360,8 @@ class ChatMessage(BaseModel):
         non_tool_content = []
 
         for block in self.content:
+            if isinstance(block, ThinkingBlock):
+                continue
             if isinstance(block, ToolResultBlock):
                 tool_results.append(block.openai_format())
                 # Extract images from tool results for separate user message
@@ -492,7 +498,12 @@ class ChatMessage(BaseModel):
                 )
             elif item.type == "thinking":
                 # Convert thinking block to empty text with metadata
-                blocks.append(TextBlock(text="", meta={"user_sees": item.thinking}))
+                blocks.append(
+                    ThinkingBlock(
+                        thinking=item.thinking,
+                        meta={"display_html": f"<i>{item.thinking}</i>"},
+                    )
+                )
             else:
                 raise ValueError(f"Unknown block type: {item.type}")
 
@@ -725,6 +736,11 @@ def anthropic_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any
         thinking_config = reasoning.to_anthropic_format(model)
         if thinking_config:
             kwargs["thinking"] = thinking_config
+        if kwargs.get("temperature", 1) != 1:
+            logging.warning(
+                f"Anthropic models require temperature to be 1 when thinking is enabled. Overwriting given temperature."
+            )
+            kwargs["temperature"] = 1
 
     return kwargs
 
@@ -747,16 +763,18 @@ def openai_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any]:
 
     # Special treatments for reasoning models
     model = kwargs.get("model", "")
+
+    if "max_tokens" in kwargs:
+        kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
+
     if model.startswith("o") or model.startswith("gpt-5"):
-        if "max_tokens" in kwargs:
-            kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")
         kwargs.pop("temperature", None)
 
     # Handle reasoning configuration for GPT-5
     if reasoning and isinstance(reasoning, ReasoningConfig):
         reasoning_config = reasoning.to_openai_format(model)
         if reasoning_config:
-            kwargs["reasoning"] = reasoning_config
+            kwargs["reasoning_effort"] = reasoning_config["effort"]
 
     return kwargs
 
@@ -793,6 +811,8 @@ def genai_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any]:
         # Convert content blocks
         parts = []
         for block in msg.content:
+            if isinstance(block, ThinkingBlock):
+                continue
             if isinstance(block, TextBlock):
                 parts.append(genai_types.Part.from_text(text=block.text))
             elif isinstance(block, ImageBlock):

@@ -245,7 +245,7 @@ async def test_reasoning_with_dynamic():
         print("No API keys found. Skipping tests.")
         return
 
-    reasoning_config = ReasoningConfig(dynamic=True)
+    reasoning_config = ReasoningConfig(effort="medium")
 
     for model_name, provider, supports_reasoning in models:
         if not supports_reasoning:
