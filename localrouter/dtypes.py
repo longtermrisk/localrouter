@@ -55,14 +55,19 @@ class ReasoningConfig(BaseModel):
 
     def to_anthropic_format(self, model: str) -> Optional[Dict[str, Any]]:
         """Convert to Anthropic thinking format if applicable."""
-        # Only claude-sonnet-4-20250514 and newer support thinking
-        if model and "claude-sonnet-4" in model:
+        # Support for extended thinking models: Opus 4.1, Opus 4, Sonnet 4, Sonnet 3.7
+        if model and (
+            "claude-opus-4" in model
+            or "claude-sonnet-4" in model
+            or "claude-3-7-sonnet" in model
+            or "claude-sonnet-3-7" in model
+        ):
             if self.budget_tokens:
                 return {"type": "enabled", "budget_tokens": self.budget_tokens}
             elif self.effort:
                 # Convert effort to token budget
                 budget_map = {
-                    "minimal": 1000,
+                    "minimal": 1024,  # Anthropic minimum
                     "low": 2000,
                     "medium": 8000,
                     "high": 16000,
@@ -87,7 +92,7 @@ class ReasoningConfig(BaseModel):
             elif self.effort:
                 # Convert effort to token budget
                 budget_map = {
-                    "minimal": 1000,
+                    "minimal": 1024,  # Anthropic minimum
                     "low": 2000,
                     "medium": 8000,
                     "high": 16000,
@@ -102,13 +107,17 @@ class ThinkingBlock(BaseModel):
     thinking: str
     type: str = "thinking"
     meta: Dict[str, Any] = Field(default_factory=dict)
+    signature: Optional[str] = None  # For encrypted thinking blocks
 
     def anthropic_format(self) -> Dict[str, Any]:
-        # Convert to empty text block with metadata for user visibility
-        return {
-            "type": "text",
-            "text": "",
+        # Return proper thinking format for Anthropic
+        result = {
+            "type": "thinking",
+            "thinking": self.thinking,
         }
+        if self.signature:
+            result["signature"] = self.signature
+        return result
 
     def openai_format(self) -> Dict[str, Any]:
         # OpenAI doesn't expose thinking blocks in responses
@@ -342,11 +351,8 @@ class ChatMessage(BaseModel):
         if isinstance(self.content, str):
             return {"role": self.role.value, "content": self.content}
 
-        content = [
-            c.anthropic_format()
-            for c in self.content
-            if not isinstance(c, ThinkingBlock)
-        ]
+        # For Anthropic, include thinking blocks when they exist (needed for multi-turn conversations)
+        content = [c.anthropic_format() for c in self.content]
         return {"role": self.role.value, "content": content}
 
     def openai_format(self) -> Dict[str, Any]:
@@ -497,11 +503,22 @@ class ChatMessage(BaseModel):
                     ToolUseBlock(id=item.id, name=item.name, input=item.input)
                 )
             elif item.type == "thinking":
-                # Convert thinking block to empty text with metadata
+                # Properly handle thinking blocks with signature
+                signature = getattr(item, "signature", None)
                 blocks.append(
                     ThinkingBlock(
                         thinking=item.thinking,
+                        signature=signature,
                         meta={"display_html": f"<i>{item.thinking}</i>"},
+                    )
+                )
+            elif item.type == "redacted_thinking":
+                # Handle redacted thinking blocks
+                data = getattr(item, "data", "")
+                blocks.append(
+                    ThinkingBlock(
+                        thinking="[REDACTED]",
+                        meta={"redacted_data": data, "is_redacted": True},
                     )
                 )
             else:
