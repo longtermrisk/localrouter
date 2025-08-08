@@ -730,6 +730,9 @@ def anthropic_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any
     if system_message:
         kwargs["system"] = system_message
 
+    if not "max_tokens" in kwargs:
+        kwargs["max_tokens"] = 32000
+
     # Handle reasoning/thinking configuration
     if reasoning and isinstance(reasoning, ReasoningConfig):
         model = kwargs.get("model", "")
