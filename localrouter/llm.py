@@ -2,6 +2,8 @@ from typing import List, Callable, Type, Union, Optional, Any, Dict, AsyncIterat
 import os
 import anthropic
 import openai
+from google import genai
+from google.genai import types as genai_types
 import json
 import backoff
 from typing import Dict, Any
@@ -110,13 +112,6 @@ async def get_response_genai(
     reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
     **kwargs: Any,
 ) -> ChatMessage:
-    try:
-        from google import genai
-        from google.genai import types as genai_types
-    except ImportError:
-        raise ImportError(
-            "google-genai package is required for Google GenAI support. Install with: pip install google-genai"
-        )
 
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
@@ -319,6 +314,8 @@ async def get_response(
         anthropic.APIConnectionError,
         anthropic.RateLimitError,
         anthropic.APIStatusError,
+        genai.errors.ClientError,
+        genai.errors.ServerError,
         TypeError,
         AssertionError,
     ),
