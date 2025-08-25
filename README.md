@@ -241,3 +241,22 @@ The reasoning configuration automatically converts between provider formats:
 - **Google (Gemini 2.5)**: Uses `thinking_budget` with dynamic option
 
 Models that don't support reasoning will ignore the configuration.
+
+## Custom Providers and Model Routing
+
+LocalRouter supports regex patterns for model matching and prioritized provider selection. OpenRouter serves as a fallback for any model containing "/" (e.g., "meta-llama/llama-3.3-70b") with lowest priority.
+
+```python
+from localrouter import add_provider, re
+
+# Add a custom provider with regex pattern support
+async def custom_get_response(model, messages, **kwargs):
+    # Your custom implementation
+    pass
+
+add_provider(
+    custom_get_response,
+    models=["custom-model-1", re.compile(r"custom-.*")],  # Exact match or regex
+    priority=50  # Lower = higher priority (default: 100, OpenRouter: 1000)
+)
+```

@@ -1,5 +1,16 @@
-from typing import List, Callable, Type, Union, Optional, Any, Dict, AsyncIterator
+from typing import (
+    List,
+    Callable,
+    Type,
+    Union,
+    Optional,
+    Any,
+    Dict,
+    AsyncIterator,
+    Pattern,
+)
 import os
+import re
 import anthropic
 import openai
 from google import genai
@@ -28,9 +39,26 @@ load_dotenv()
 
 
 class Provider:
-    def __init__(self, get_response: Callable[..., Any], models: List[str]) -> None:
+    def __init__(
+        self,
+        get_response: Callable[..., Any],
+        models: List[Union[str, Pattern]],
+        priority: int = 100,
+    ) -> None:
         self.models = models
         self.get_response = get_response
+        self.priority = priority
+
+    def supports_model(self, model: str) -> bool:
+        """Check if this provider supports the given model."""
+        for model_pattern in self.models:
+            if isinstance(model_pattern, str):
+                if model == model_pattern:
+                    return True
+            elif isinstance(model_pattern, Pattern):
+                if model_pattern.match(model):
+                    return True
+        return False
 
 
 # ---------------------------------------------------------------------------
@@ -199,32 +227,20 @@ async def get_response_genai(
 
 providers: List[Provider] = []
 
-# Anthropic
+# Anthropic (priority 10 - higher priority than OpenRouter)
 try:
     _available_anthropic_models = [
         m.id for m in anthropic.Anthropic().models.list(limit=1000).data
     ]
     providers.append(
-        Provider(get_response_anthropic, models=_available_anthropic_models)
+        Provider(
+            get_response_anthropic, models=_available_anthropic_models, priority=10
+        )
     )
 except Exception:
     pass
 
-# OpenRouter
-if "OPENROUTER_API_KEY" in os.environ:
-    providers.append(
-        Provider(
-            get_response_factory(
-                openai.AsyncOpenAI(
-                    api_key=os.environ["OPENROUTER_API_KEY"],
-                    base_url="https://openrouter.ai/api/v1",
-                )
-            ),
-            models=["qwen/qwen3-235b-a22b"],
-        )
-    )
-
-# OpenAI
+# OpenAI (priority 10 - higher priority than OpenRouter)
 if "OPENAI_API_KEY" in os.environ:
     try:
         _available_openai_models = [
@@ -236,17 +252,34 @@ if "OPENAI_API_KEY" in os.environ:
             Provider(
                 get_response_factory(openai.AsyncOpenAI()),
                 models=_available_openai_models,
+                priority=10,
             )
         )
     except Exception:
         pass
 
-# Google GenAI
+# Google GenAI (priority 10 - higher priority than OpenRouter)
 if "GEMINI_API_KEY" in os.environ or "GOOGLE_API_KEY" in os.environ:
     providers.append(
         Provider(
             get_response_genai,
             models=["gemini-2.5-pro", "gemini-2.5-flash"],
+            priority=10,
+        )
+    )
+
+# OpenRouter (priority 1000 - lowest priority, fallback for models with "/")
+if "OPENROUTER_API_KEY" in os.environ:
+    providers.append(
+        Provider(
+            get_response_factory(
+                openai.AsyncOpenAI(
+                    api_key=os.environ["OPENROUTER_API_KEY"],
+                    base_url="https://openrouter.ai/api/v1",
+                )
+            ),
+            models=[re.compile(r".+/.+")],  # Matches any model with "/" in the name
+            priority=1000,
         )
     )
 
@@ -266,42 +299,59 @@ async def get_response(
     if reasoning and isinstance(reasoning, dict):
         reasoning = ReasoningConfig(**reasoning)
 
-    all_models = []
+    # Find all providers that support this model and sort by priority
+    supporting_providers = []
     for provider in providers:
-        all_models.extend(provider.models)
-        if model in provider.models:
-            response = await provider.get_response(
-                model=model,
-                messages=messages,
-                tools=tools,
-                response_format=response_format,
-                reasoning=reasoning,
-                **kwargs,
-            )
+        if provider.supports_model(model):
+            supporting_providers.append(provider)
 
-            # Handle empty responses
-            if len(response.content) == 0:
-                messages = messages + [
-                    ChatMessage(
-                        role=MessageRole.user,
-                        content=[TextBlock(text="Please continue.")],
-                    )
-                ]
-                response = await provider.get_response(
-                    model=model,
-                    messages=messages,
-                    tools=tools,
-                    response_format=response_format,
-                    reasoning=reasoning,
-                    **kwargs,
-                )
+    # Sort by priority (lower number = higher priority)
+    supporting_providers.sort(key=lambda p: p.priority)
 
-            assert len(response.content) > 0, "Response content is empty"
-            return response
+    if not supporting_providers:
+        # Collect all available models for error message
+        all_models = []
+        for provider in providers:
+            for model_pattern in provider.models:
+                if isinstance(model_pattern, str):
+                    all_models.append(model_pattern)
+                else:
+                    all_models.append(f"<regex: {model_pattern.pattern}>")
 
-    raise ValueError(
-        f"Model '{model}' not supported by any provider. Supported models: {all_models}"
+        raise ValueError(
+            f"Model '{model}' not supported by any provider. Supported models: {all_models}"
+        )
+
+    # Use the highest priority provider
+    provider = supporting_providers[0]
+    response = await provider.get_response(
+        model=model,
+        messages=messages,
+        tools=tools,
+        response_format=response_format,
+        reasoning=reasoning,
+        **kwargs,
     )
+
+    # Handle empty responses
+    if len(response.content) == 0:
+        messages = messages + [
+            ChatMessage(
+                role=MessageRole.user,
+                content=[TextBlock(text="Please continue.")],
+            )
+        ]
+        response = await provider.get_response(
+            model=model,
+            messages=messages,
+            tools=tools,
+            response_format=response_format,
+            reasoning=reasoning,
+            **kwargs,
+        )
+
+    assert len(response.content) > 0, "Response content is empty"
+    return response
 
 
 @backoff.on_exception(
@@ -359,6 +409,24 @@ async def get_response_with_backoff(
         reasoning=reasoning,
         **kwargs,
     )
+
+
+# ---------------------------------------------------------------------------
+# Custom Provider API
+# ---------------------------------------------------------------------------
+def add_provider(
+    get_response_func: Callable[..., Any],
+    models: List[Union[str, Pattern]],
+    priority: int = 100,
+) -> None:
+    """Add a custom provider to the router.
+
+    Args:
+        get_response_func: Async function that implements the provider's get_response interface
+        models: List of model IDs (strings) or regex patterns to match against
+        priority: Priority level (lower = higher priority, default 100)
+    """
+    providers.append(Provider(get_response_func, models, priority))
 
 
 dcache = DCache(cache_dir=os.path.expanduser("~/.cache/localrouter"))

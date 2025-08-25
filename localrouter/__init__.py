@@ -1,5 +1,7 @@
 """LocalRouter: Multi-provider LLM client with unified message format and tool support."""
 
+import re
+
 from .dtypes import (
     ChatMessage,
     MessageRole,
@@ -22,6 +24,7 @@ from .llm import (
     get_response_cached,
     get_response_cached_with_backoff,
     providers,
+    add_provider,
 )
 from .dtypes import (
     openai_format,
@@ -31,7 +34,7 @@ from .dtypes import (
     messages_to_content_blocks,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.2.5"
 
 __all__ = [
     "ChatMessage",
@@ -52,6 +55,8 @@ __all__ = [
     "get_response_cached",
     "get_response_cached_with_backoff",
     "providers",
+    "add_provider",
+    "re",
     "openai_format",
     "anthropic_format",
     "genai_format",
