@@ -14,7 +14,35 @@ This project uses uv to manage dependencies. The default python points to the lo
 
 ## Recent Updates
 
-### Reasoning/Thinking Support (Latest)
+### Provider Routing and Regex Patterns (Latest)
+Enhanced the provider system with flexible model matching and prioritization:
+
+- **Regex Pattern Support**: Providers can now use regex patterns in addition to exact model strings
+- **Priority-based Routing**: Providers have priority levels (lower = higher priority)
+- **OpenRouter Fallback**: OpenRouter now serves as lowest-priority fallback for models containing "/" (e.g., "meta-llama/llama-3.3-70b")
+- **Custom Provider API**: Add custom providers with `add_provider(func, models, priority)`
+- **Comprehensive Testing**: Full test suite for the new routing functionality
+
+Example usage:
+```python
+from localrouter import add_provider, re
+
+# Add custom provider with regex patterns
+async def my_provider(model, messages, **kwargs):
+    # Your implementation
+    pass
+
+add_provider(
+    my_provider,
+    models=["exact-model", re.compile(r"custom-.*")],
+    priority=50  # Higher priority than default (100)
+)
+
+# Models with "/" automatically route to OpenRouter as fallback
+response = await get_response("meta-llama/llama-3.3-70b", messages)
+```
+
+### Reasoning/Thinking Support
 Added support for reasoning budgets across OpenAI, Anthropic, and Google Gemini models:
 
 - **ReasoningConfig** class for configuring reasoning/thinking behavior
