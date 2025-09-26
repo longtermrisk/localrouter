@@ -33,6 +33,7 @@ dependencies = [
     "matplotlib>=3.10.6",
     "pytest>=8.4.1",
     "pytest-asyncio>=1.1.0",
+    "vllm>=0.10.2",
 ]
 
 [project.optional-dependencies]

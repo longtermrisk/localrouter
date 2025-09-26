@@ -2,6 +2,7 @@ import os
 import re
 import json
 from typing import List, Dict, Any, Optional, Union
+import os
 from pydantic import BaseModel
 
 from .dtypes import (
@@ -19,6 +20,39 @@ from .xml_utils import dump_xml
 # XML helper construction
 # -----------------------------
 
+def _schema_to_definition_xml(schema: Dict[str, Any]) -> Dict[str, Any]:
+    t = schema.get("type")
+    if t == "object":
+        props = schema.get("properties", {})
+        required = set(schema.get("required", []))
+        out: Dict[str, Any] = {}
+        for k, v in props.items():
+            # Add type label with optional flag and description in value text
+            vt = v.get("type", "string")
+            opt = "optional " if k not in required else ""
+            desc = v.get("description") or ""
+            if vt == "object":
+                out[k] = _schema_to_definition_xml(v)
+            elif vt == "array":
+                # Represent array as <k> array: description <item> ... </item> </k>
+                item_schema = v.get("items", {"type": "string"})
+                out[k] = {
+                    "type": f"{opt}array: {desc}",
+                    "item": _schema_to_definition_xml(item_schema).get(
+                        "item", _schema_to_definition_xml(item_schema)
+                    ),
+                }
+            else:
+                out[k] = f"{opt}{vt}: {desc}".strip()
+        return out
+    elif t == "array":
+        item_schema = schema.get("items", {"type": "string"})
+        return {"item": _schema_to_definition_xml(item_schema)}
+    else:
+        desc = schema.get("description") or ""
+        return {"value": f"{t or 'string'}: {desc}"}
+
+
 def build_system_message_xml(tools: Optional[List[ToolDefinition]]) -> str:
     if not tools:
         return (
@@ -27,24 +61,26 @@ def build_system_message_xml(tools: Optional[List[ToolDefinition]]) -> str:
 
     tool_defs = []
     for t in tools:
-        tool_defs.append(
-            {
-                "tool": {
-                    "name": t.name,
-                    "description": t.description,
-                    "input_schema": json.dumps(t.input_schema),
-                }
+        definition = {
+            "tool": {
+                "name": t.name,
+                "input": _schema_to_definition_xml(t.input_schema),
             }
-        )
+        }
+        tool_defs.append(definition)
 
     header = (
-        "Use one of the available tools to choose an action. "
+        "Use one of the available tools to choose an action.\n"
+        "Definition schema mirrors the tool_use XML. Fill values in a tool_use block.\n"
         "Respond in valid XML to call a tool."
     )
-    example = (
-        "<tool_use>\n  <name>tool_name</name>\n  <input>\n    <key>value</key>\n  </input>\n</tool_use>\n"
+    example = dump_xml(
+        tool_use={
+            "name": "tool_name",
+            "input": {"key": "value"},
+        }
     )
-    return header + "\n\n" + dump_xml(*tool_defs).strip() + "\n\nRespond in valid XML in order to call a tool, for example:\n\n" + example
+    return header + "\n\n" + dump_xml(*tool_defs) + "\n\nExample:\n\n" + example
 
 
 def render_message_to_xml_string(message: ChatMessage) -> str:
@@ -98,22 +134,34 @@ def generate_tool_use_grammar(tools: Optional[List[ToolDefinition]]) -> str:
     names = [t.name for t in tools]
     # Build alternation for names
     name_alt = " | ".join([f"'{n}'" for n in names])
-
-    # Collect unique keys from schemas (best effort)
+    # Recursive grammar for arbitrarily nested objects/arrays
+    # We derive key set from schemas but allow recursive nesting via VALUE := ELEMENT | ARRAY | STRING
     keys = set()
+    def collect_keys(schema: Dict[str, Any]):
+        t = schema.get('type')
+        if t == 'object':
+            props = schema.get('properties', {})
+            for k, v in props.items():
+                keys.add(k)
+                collect_keys(v)
+        elif t == 'array':
+            collect_keys(schema.get('items', {'type': 'string'}))
     for t in tools:
-        props = (t.input_schema or {}).get("properties", {})
-        for k in props.keys():
-            keys.add(k)
+        collect_keys(t.input_schema or {})
+
     key_alt = " | ".join([f"'{k}'" for k in sorted(keys)]) if keys else "'key'"
 
     grammar = [
         "tool_use := '<tool_use>' name input '</tool_use>'",
         "name := '<name>' (" + name_alt + ") '</name>'",
-        "input := '<input>' (kv_pair)+ '</input>'",
-        "kv_pair := '<' key '>' TEXT '</' key '>'",
+        "input := '<input>' (pair)+ '</input>'",
+        "pair := '<' key '>' VALUE '</' key '>'",
         "key := " + key_alt,
-        "TEXT := /[^<][^<]*/",
+        "VALUE := OBJECT | ARRAY | CDATA | TEXT",
+        "OBJECT := '<input>' (pair)+ '</input>'",
+        "ARRAY := '<list>' (VALUE)+ '</list>'",
+        r"CDATA := '<![CDATA[' TEXT ']]>'",
+        r"TEXT := /[^<][^<]*/",
     ]
     return "\n".join(grammar) + "\n"
 
@@ -174,8 +222,10 @@ def build_vllm_chat_payload(
 # -----------------------------
 
 def parse_vllm_xml_response(xml_text: str) -> ChatMessage:
-    """Parse a vLLM XML tool_use response into a ChatMessage with ToolUseBlock."""
-    # Very lightweight parse: find <tool_use> with <name> and <input> and parse simple kv pairs
+    """Parse a vLLM XML tool_use response into a ChatMessage with ToolUseBlock.
+
+    Supports nested objects via nested <input> blocks and arrays via <list> ... </list>
+    """
     def _find(tag: str, s: str) -> Optional[str]:
         start = s.find(f"<{tag}>")
         if start == -1:
@@ -189,29 +239,67 @@ def parse_vllm_xml_response(xml_text: str) -> ChatMessage:
     tu_body = _find("tool_use", xml_text) or xml_text
     name = _find("name", tu_body) or ""
 
+    def _strip_cdata(val: str) -> str:
+        val = val.strip()
+        if val.startswith("<![CDATA[") and val.endswith("]]>"):
+            return val[len("<![CDATA[") : -3]
+        return val
+
+    def parse_value(t: str):
+        t = t.strip()
+        if t.startswith("<input>"):
+            inner = _find("input", t) or ""
+            return parse_object(inner)
+        if t.startswith("<list>"):
+            items = _find("list", t) or ""
+            arr = []
+            p = 0
+            while True:
+                lt = items.find("<", p)
+                if lt == -1:
+                    break
+                gt = items.find(">", lt + 1)
+                if gt == -1:
+                    break
+                tag = items[lt + 1 : gt]
+                if tag.startswith("/"):
+                    p = gt + 1
+                    continue
+                end = items.find(f"</{tag}>", gt + 1)
+                if end == -1:
+                    break
+                val = items[gt + 1 : end]
+                arr.append(parse_value(val))
+                p = end + len(f"</{tag}>")
+            return arr
+        return _strip_cdata(t)
+
+    def parse_object(text: str) -> Dict[str, Any]:
+        result: Dict[str, Any] = {}
+        pos = 0
+        while True:
+            lt = text.find("<", pos)
+            if lt == -1:
+                break
+            gt = text.find(">", lt + 1)
+            if gt == -1:
+                break
+            key = text[lt + 1 : gt]
+            if "/" in key or " " in key:
+                pos = gt + 1
+                continue
+            close_tag = f"</{key}>"
+            close = text.find(close_tag, gt + 1)
+            if close == -1:
+                pos = gt + 1
+                continue
+            value = text[gt + 1 : close]
+            result[key] = parse_value(value)
+            pos = close + len(close_tag)
+        return result
+
     input_body = _find("input", tu_body) or ""
-    # Parse each immediate child tag as a key
-    inputs: Dict[str, Any] = {}
-    pos = 0
-    while True:
-        lt = input_body.find("<", pos)
-        if lt == -1:
-            break
-        gt = input_body.find(">", lt + 1)
-        if gt == -1:
-            break
-        key = input_body[lt + 1 : gt]
-        if "/" in key or " " in key:
-            pos = gt + 1
-            continue
-        close_tag = f"</{key}>"
-        close = input_body.find(close_tag, gt + 1)
-        if close == -1:
-            pos = gt + 1
-            continue
-        value = input_body[gt + 1 : close].strip()
-        inputs[key] = value
-        pos = close + len(close_tag)
+    inputs = parse_object(input_body)
 
     tub = ToolUseBlock(name=name, input=inputs)
     return ChatMessage(role=MessageRole.assistant, content=[tub])

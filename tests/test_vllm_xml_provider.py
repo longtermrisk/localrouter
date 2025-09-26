@@ -41,9 +41,11 @@ def test_build_system_message_xml():
     tool = make_weather_tool()
     sys_text = vllm_xml.build_system_message_xml([tool])
     assert "Use one of the available tools" in sys_text
-    assert "<tool>" in sys_text and "<name> get_weather </name>" in sys_text
-    assert "<input_schema>" in sys_text
+    assert "<tool>" in sys_text
+    assert "get_weather" in sys_text  # value can be wrapped in CDATA
+    assert "<input>" in sys_text  # definition uses XML input, not JSON schema
     assert "Respond in valid XML" in sys_text
+    assert "<![CDATA[" in sys_text  # CDATA present for payload safety
 
 
 def test_render_message_to_xml_string_with_tool_result():

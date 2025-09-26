@@ -124,7 +124,8 @@ class ThinkingBlock(BaseModel):
         return {"type": "text", "text": ""}
 
     def xml_format(self) -> Dict[str, Any]:
-        return {"type": "text", "text": f"<thinking>{self.thinking}</thinking>"}
+        from .xml_utils import dump_xml
+        return {"type": "text", "text": dump_xml(thinking=self.thinking)}
 
 
 class ToolDefinition(BaseModel):
@@ -199,11 +200,9 @@ class TextBlock(BaseModel):
             "text": self.text,
         }
 
-    def xml_format(self) -> str:
-        return {
-            "type": "text",
-            "text": self.text,
-        }
+    def xml_format(self) -> Dict[str, Any]:
+        from .xml_utils import dump_xml
+        return {"type": "text", "text": dump_xml(text=self.text)}
 
 
 class Base64ImageSource(BaseModel):
@@ -243,8 +242,9 @@ class ImageBlock(BaseModel):
         data_url = f"data:{self.source.media_type};base64,{self.source.data}"
         return {"type": "image_url", "image_url": {"url": data_url}}
 
-    def xml_format(self) -> str:
-        return {"type": "text", "text": "(image)"}
+    def xml_format(self) -> Dict[str, Any]:
+        from .xml_utils import dump_xml
+        return {"type": "text", "text": dump_xml(image="(image)")}
 
 
 class ToolUseBlock(BaseModel):
@@ -272,9 +272,10 @@ class ToolUseBlock(BaseModel):
             },
         }
 
-    def xml_format(self) -> str:
+    def xml_format(self) -> Dict[str, Any]:
         return dict(
-            type="text", text=dump_xml(tool_use=dict(name=self.name, input=self.input))
+            type="text",
+            text=dump_xml(tool_use=dict(name=self.name, input=self.input or {})),
         )
 
 
@@ -309,18 +310,19 @@ class ToolResultBlock(BaseModel):
             "content": content_str,
         }
 
-    def xml_format(self) -> str:
-        output = "\n".join(
-            [
-                (
-                    block.xml_format()["text"]
-                    if hasattr(block, "xml_format")
-                    else f"Skipped: {block.type}"
-                )
-                for block in self.content
-            ]
+    def xml_format(self) -> Dict[str, Any]:
+        texts = []
+        for block in self.content:
+            if hasattr(block, "xml_format"):
+                rendered = block.xml_format()
+                if isinstance(rendered, dict):
+                    texts.append(rendered.get("text", ""))
+            else:
+                texts.append(f"Skipped: {block.type}")
+        output = "\n".join(texts)
+        return dict(
+            type="text", text=dump_xml(tool_result=dict(tool_use_id=self.tool_use_id, output=output))
         )
-        return dict(type="text", text=dump_xml(tool_result=dict(output=output)))
 
 
 ContentBlock = Union[

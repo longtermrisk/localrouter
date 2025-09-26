@@ -75,22 +75,54 @@ def parse_xml(text, schema):
 
 
 def dump_xml(*args, indent=0, **data):
-    """Pretty print an XML string from a dict or list of dicts without escaping string values."""
-    serialized = ""
-    # space = " " * indent
-    space = "" * indent
+    """Pretty print XML from dicts/lists with indentation and CDATA for strings.
+
+    Usage examples:
+      dump_xml(tool={"name": "get_weather", "input_schema": {...}})
+      dump_xml({"tool": {...}}, {"tool": {...}})
+    """
+    lines = []
+
+    def cdata(text: str) -> str:
+        return f"<![CDATA[{text}]]>"
+
+    def serialize_key_value(key, value, level):
+        ind = "  " * level
+        if isinstance(value, dict):
+            lines.append(f"{ind}<{key}>")
+            for ck, cv in value.items():
+                serialize_key_value(ck, cv, level + 1)
+            lines.append(f"{ind}</{key}>")
+        elif isinstance(value, list):
+            lines.append(f"{ind}<{key}>")
+            for item in value:
+                serialize_key_value("item", item, level + 1)
+            lines.append(f"{ind}</{key}>")
+        elif value is None:
+            lines.append(f"{ind}<{key}></{key}>")
+        else:
+            # Wrap string content in CDATA to allow XML-in-payload safely
+            text = cdata(str(value))
+            lines.append(f"{ind}<{key}>{text}</{key}>")
+
+    # Positional args may contain dicts or lists
     for arg in args:
         if isinstance(arg, dict):
-            serialized += dump_xml(**arg, indent=indent + 1)
+            for k, v in arg.items():
+                serialize_key_value(k, v, indent)
         elif isinstance(arg, list):
             for item in arg:
-                serialized += dump_xml(item=item, indent=indent + 1)
+                if isinstance(item, dict):
+                    for k, v in item.items():
+                        serialize_key_value(k, v, indent)
+                else:
+                    serialize_key_value("item", item, indent)
         else:
-            serialized += str(arg)
+            # Raw strings: include as-is (already CDATA elsewhere when needed)
+            lines.append(("  " * indent) + str(arg))
+
+    # Keyword args
     for key, value in data.items():
-        child = dump_xml(value, indent=indent + 1)
-        if "\n" in child:
-            serialized += f"{space}<{key}>\n{child}\n{space}</{key}>\n"
-        else:
-            serialized += f"{space}<{key}> {child} </{key}>\n"
-    return serialized
+        serialize_key_value(key, value, indent)
+
+    return "\n".join(lines)
