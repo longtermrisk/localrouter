@@ -283,6 +283,74 @@ if "OPENROUTER_API_KEY" in os.environ:
         )
     )
 
+# ---------------------------------------------------------------------------
+# vLLM XML provider (if base URL is configured)
+# ---------------------------------------------------------------------------
+try:
+    from .vllm_xml import (
+        build_vllm_chat_payload,
+        parse_vllm_xml_response,
+        get_allowed_model_patterns,
+    )
+
+    if os.environ.get("VLLM_BASE_URL"):
+        async def get_response_vllm(
+            messages: List[ChatMessage],
+            tools: Optional[List[ToolDefinition]],
+            response_format: Optional[Dict[str, Any]] = None,
+            reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
+            **kwargs: Any,
+        ) -> ChatMessage:
+            if response_format is not None:
+                raise NotImplementedError(
+                    "Structured output is not yet supported via vLLM provider"
+                )
+
+            payload = build_vllm_chat_payload(messages, tools, **kwargs)
+
+            base_url = os.environ["VLLM_BASE_URL"].rstrip("/")
+            url = f"{base_url}/chat/completions"
+
+            # Use aiohttp if available, otherwise fallback to requests
+            data = None
+            try:
+                import aiohttp  # type: ignore
+
+                timeout = aiohttp.ClientTimeout(total=600)
+                async with aiohttp.ClientSession(timeout=timeout) as session:
+                    async with session.post(url, json=payload) as resp:
+                        resp.raise_for_status()
+                        data = await resp.json()
+            except Exception:
+                import requests
+
+                r = requests.post(url, json=payload, timeout=600)
+                r.raise_for_status()
+                data = r.json()
+
+            # vLLM OAI-compatible response
+            content = data.get("choices", [{}])[0].get("message", {}).get(
+                "content", ""
+            )
+            # Parse XML back to ChatMessage with tool calls if any
+            if content and "<tool_use>" in content:
+                return parse_vllm_xml_response(content)
+            else:
+                return ChatMessage(
+                    role=MessageRole.assistant,
+                    content=[TextBlock(text=content or "")],
+                )
+
+        providers.append(
+            Provider(
+                get_response_vllm,
+                models=get_allowed_model_patterns(),
+                priority=20,  # prefer above OpenRouter fallback but below direct SDKs
+            )
+        )
+except Exception:
+    pass
+
 
 # ---------------------------------------------------------------------------
 # Main API
