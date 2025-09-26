@@ -105,6 +105,33 @@ image_msg = ChatMessage(
 
 ## Tool Calling
 
+### vLLM XML provider with grammar-guided tool use
+
+Set up environment variables:
+- VLLM_BASE_URL: e.g. http://localhost:8000/v1 (OpenAI-compatible endpoint)
+- VLLM_ALLOWED_MODELS: comma-separated regex list to match model names handled by vLLM (e.g. "unsloth/.+,qwen.*"). If unset, defaults to models containing "/".
+
+The provider will:
+- Convert tools to XML and inject a system message explaining XML tool calling
+- Generate a simple grammar that constrains tool_use XML
+- Call the vLLM /chat/completions endpoint and pass guided_decoding: {type: "grammar", grammar}
+- Parse the XML result back into a ToolUseBlock
+
+Example smoke test:
+
+uv run python scripts/vllm_smoke_test.py
+
+Make sure a vLLM server is running, for example:
+
+vllm serve --model unsloth/Qwen3-4B --dtype auto --chat-template mistral --port 8000 --host 0.0.0.0
+
+Then set env:
+
+export VLLM_BASE_URL=http://localhost:8000/v1
+export VLLM_ALLOWED_MODELS=unsloth/.+
+
+and run the smoke script. The assistant should produce a <tool_use> XML block calling a tool with input keys derived from your schema.
+
 Define tools and get structured function calls:
 
 ```python
