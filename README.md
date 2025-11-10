@@ -260,3 +260,60 @@ add_provider(
     priority=50  # Lower = higher priority (default: 100, OpenRouter: 1000)
 )
 ```
+
+## Request-Level Routing
+
+LocalRouter allows you to register router functions that can dynamically modify model selection based on request parameters. This is useful for:
+- Creating model aliases
+- Routing requests with images to vision models
+- Selecting models based on temperature, tools, or other parameters
+- Implementing fallback strategies
+
+```python
+from localrouter import register_router
+
+# Example 1: Simple alias
+def alias_router(req):
+    if req['model'] == 'default':
+        return 'gpt-5'
+    return None  # Keep original model
+
+register_router(alias_router)
+
+# Now you can use the alias
+response = await get_response(
+    model="default",  # Will be routed to gpt-5
+    messages=messages
+)
+```
+
+```python
+# Example 2: Route based on message content
+def vision_router(req):
+    """Route requests with images to vision-capable models"""
+    messages = req.get('messages', [])
+    for msg in messages:
+        for block in msg.content:
+            if hasattr(block, '__class__') and 'ImageBlock' in block.__class__.__name__:
+                return 'qwen/qwen3-vl-30b-a3b-instruct'
+    return None  # Use original model for text-only requests
+
+register_router(vision_router)
+```
+
+```python
+# Example 3: Route based on parameters
+def temperature_router(req):
+    """Use different models based on temperature"""
+    temperature = req.get('temperature', 0)
+    if temperature > 0.8:
+        return 'gpt-5'  # Creative tasks
+    return 'gpt-4.1-mini'  # Deterministic tasks
+
+register_router(temperature_router)
+```
+
+**Router Function Interface:**
+- **Input**: Dictionary with keys: `model`, `messages`, `tools`, `response_format`, `reasoning`, and any other kwargs
+- **Output**: String (new model name) or None (keep original model)
+- **Execution**: Routers are applied in registration order, and each router sees the model name from the previous router

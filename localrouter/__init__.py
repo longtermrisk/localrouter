@@ -25,6 +25,8 @@ from .llm import (
     get_response_cached_with_backoff,
     providers,
     add_provider,
+    register_router,
+    print_available_models,
 )
 from .dtypes import (
     openai_format,
@@ -56,10 +58,12 @@ __all__ = [
     "get_response_cached_with_backoff",
     "providers",
     "add_provider",
+    "register_router",
+    "print_available_models",
     "re",
     "openai_format",
     "anthropic_format",
     "genai_format",
     "xml_format",
-    "messages_to_content_blocks",
+    "messages_to_content_blocks"
 ]

@@ -227,6 +227,33 @@ async def get_response_genai(
 
 providers: List[Provider] = []
 
+# ---------------------------------------------------------------------------
+# Router registration
+# ---------------------------------------------------------------------------
+
+routers: List[Callable[[Dict[str, Any]], Optional[str]]] = []
+
+
+def register_router(router_func: Callable[[Dict[str, Any]], Optional[str]]) -> None:
+    """Register a router function that can modify or redirect model requests.
+
+    Router functions receive the request parameters as a dict and can return:
+    - A string: The new model name to use (e.g., "gpt-4" -> "gpt-5")
+    - None: Keep the original model name
+
+    Args:
+        router_func: Function that takes request dict and returns Optional[str]
+
+    Example:
+        def my_router(req):
+            if req['model'] == 'default':
+                return 'gpt-5'
+            return None
+
+        register_router(my_router)
+    """
+    routers.append(router_func)
+
 # Anthropic (priority 10 - higher priority than OpenRouter)
 try:
     _available_anthropic_models = [
@@ -298,6 +325,22 @@ async def get_response(
     # Convert dict to ReasoningConfig if needed (centralized conversion)
     if reasoning and isinstance(reasoning, dict):
         reasoning = ReasoningConfig(**reasoning)
+
+    # Apply registered routers to potentially modify the model
+    request_dict = {
+        "model": model,
+        "messages": messages,
+        "tools": tools,
+        "response_format": response_format,
+        "reasoning": reasoning,
+        **kwargs,
+    }
+
+    for router in routers:
+        result = router(request_dict)
+        if result is not None:
+            model = result
+            request_dict["model"] = model
 
     # Find all providers that support this model and sort by priority
     supporting_providers = []
@@ -512,3 +555,51 @@ async def get_response_cached_with_backoff(
         reasoning=reasoning,
         **kwargs,
     )
+
+
+def print_available_models() -> None:
+    """Print all available providers and the models they support.
+
+    Displays providers sorted by priority, showing which models each provider handles.
+    """
+    if not providers:
+        print("No providers available")
+        return
+
+    # Sort providers by priority
+    sorted_providers = sorted(providers, key=lambda p: p.priority)
+
+    print("Available Providers and Models:")
+    print("=" * 80)
+
+    for i, provider in enumerate(sorted_providers, 1):
+        provider_name = provider.get_response.__name__.replace("get_response_", "").title()
+        print(f"\n{i}. {provider_name} (Priority: {provider.priority})")
+        print("-" * 80)
+
+        if not provider.models:
+            print("  No models registered")
+            continue
+
+        regex_patterns = []
+        explicit_models = []
+
+        for model_pattern in provider.models:
+            if isinstance(model_pattern, str):
+                explicit_models.append(model_pattern)
+            elif isinstance(model_pattern, Pattern):
+                regex_patterns.append(model_pattern.pattern)
+
+        if explicit_models:
+            print("  Explicit models:")
+            for model in explicit_models[:10]:
+                print(f"    - {model}")
+            if len(explicit_models) > 10:
+                print(f"    [+{explicit_models - 10} additional models not shown]")
+
+        if regex_patterns:
+            print("  Pattern matches:")
+            for pattern in regex_patterns:
+                print(f"    - {pattern}")
+
+    print("\n" + "=" * 80)
