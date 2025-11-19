@@ -2,9 +2,9 @@ import os
 import json
 import base64
 from enum import Enum
-from typing import Any, Dict, List, Optional, Sequence, Union
+from typing import Any, Dict, List, Optional, Sequence, Union, Annotated
 from uuid import uuid4
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, Discriminator
 import yaml
 import logging
 
@@ -347,6 +347,42 @@ class ChatMessage(BaseModel):
                 raise ValueError(f"Invalid role: {v}")
         return v
 
+    @field_validator("content", mode="before")
+    @classmethod
+    def convert_content_blocks(cls, v):
+        """Convert raw dicts to proper ContentBlock types based on 'type' field"""
+        if not isinstance(v, list):
+            return v
+        
+        result = []
+        for item in v:
+            # If it's already a proper block type, keep it
+            if isinstance(item, (TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock)):
+                result.append(item)
+                continue
+            
+            # If it's a dict, reconstruct the proper type
+            if isinstance(item, dict):
+                block_type = item.get('type', 'text')
+                if block_type == 'thinking':
+                    result.append(ThinkingBlock(**item))
+                elif block_type == 'text':
+                    result.append(TextBlock(**item))
+                elif block_type == 'image':
+                    result.append(ImageBlock(**item))
+                elif block_type == 'tool_use':
+                    result.append(ToolUseBlock(**item))
+                elif block_type == 'tool_result':
+                    result.append(ToolResultBlock(**item))
+                else:
+                    # Fallback to text block for unknown types
+                    result.append(TextBlock(text=str(item), type='text'))
+            else:
+                # If it's something else, convert to text
+                result.append(TextBlock(text=str(item), type='text'))
+        
+        return result
+
     def anthropic_format(self):  # -> dict[str, Any]
         if isinstance(self.content, str):
             return {"role": self.role.value, "content": self.content}
@@ -537,8 +573,8 @@ class ChatMessage(BaseModel):
             if hasattr(candidate, "content") and hasattr(candidate.content, "parts"):
                 for part in candidate.content.parts:
                     if hasattr(part, "thought") and part.thought:
-                        # This is a thought summary - add as empty text with metadata
-                        blocks.append(TextBlock(text="", meta={"user_sees": part.text}))
+                        # Use ThinkingBlock for thoughts
+                        blocks.append(ThinkingBlock(thinking=part.text))
                     elif hasattr(part, "text") and part.text:
                         blocks.append(TextBlock(text=part.text))
 
@@ -778,11 +814,14 @@ def openai_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any]:
 
     kwargs["messages"] = oai_messages
 
+    model = kwargs.get("model", "")
+
+    # Strip tools for models that don't support them (o1-preview, o1-mini)
+    if model in ["o1-preview", "o1-mini"]:
+        tools = None
+
     if tools:
         kwargs["tools"] = [t.openai_format for t in tools]
-
-    # Special treatments for reasoning models
-    model = kwargs.get("model", "")
 
     if "max_tokens" in kwargs:
         kwargs["max_completion_tokens"] = kwargs.pop("max_tokens")

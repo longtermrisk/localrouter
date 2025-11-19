@@ -13,8 +13,15 @@ import os
 import re
 import anthropic
 import openai
-from google import genai
-from google.genai import types as genai_types
+
+# Conditional import for google-genai
+try:
+    from google import genai
+    from google.genai import types as genai_types
+except ImportError:
+    genai = None
+    genai_types = None
+
 import json
 import backoff
 from typing import Dict, Any
@@ -140,6 +147,9 @@ async def get_response_genai(
     reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
     **kwargs: Any,
 ) -> ChatMessage:
+    
+    if genai is None:
+        raise ImportError("google-genai package is required for Google GenAI support. Install with: pip install google-genai")
 
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
@@ -290,7 +300,7 @@ if "GEMINI_API_KEY" in os.environ or "GOOGLE_API_KEY" in os.environ:
     providers.append(
         Provider(
             get_response_genai,
-            models=["gemini-2.5-pro", "gemini-2.5-flash"],
+            models=["gemini-2.5-pro", "gemini-2.5-flash", "gemini-3-pro-preview"],
             priority=10,
         )
     )
@@ -407,8 +417,8 @@ async def get_response(
         anthropic.APIConnectionError,
         anthropic.RateLimitError,
         anthropic.APIStatusError,
-        genai.errors.ClientError,
-        genai.errors.ServerError,
+        # Conditionally handle GenAI errors
+        *( (genai.errors.ClientError, genai.errors.ServerError) if genai else () ),
         TypeError,
         AssertionError,
     ),
@@ -595,7 +605,7 @@ def print_available_models() -> None:
             for model in explicit_models[:10]:
                 print(f"    - {model}")
             if len(explicit_models) > 10:
-                print(f"    [+{explicit_models - 10} additional models not shown]")
+                print(f"    [+{len(explicit_models) - 10} additional models not shown]")
 
         if regex_patterns:
             print("  Pattern matches:")
