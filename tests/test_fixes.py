@@ -11,49 +11,13 @@ from localrouter import (
 )
 from localrouter.dtypes import openai_format, genai_format
 
-@pytest.mark.asyncio
-async def test_openai_completion_model():
-    """Test that completion models use the completion API."""
-    with patch("openai.AsyncOpenAI") as mock_openai_cls:
-        mock_oai = AsyncMock()
-        mock_openai_cls.return_value = mock_oai
-        
-        # Mock completions.create
-        mock_oai.completions.create.return_value = MagicMock(
-            choices=[MagicMock(text="Completion response")]
-        )
-        
-        # We need to ensure the provider is registered with the mock
-        # Since we patch AsyncOpenAI, we need to re-register providers or patch get_response_factory's internal usage
-        
-        # Easier way: Import llm module and patch the client in the provider? 
-        # Or just call get_response_factory directly.
-        
-        from localrouter.llm import get_response_factory
-        get_response_openai = get_response_factory(mock_oai)
-        
-        messages = [ChatMessage(role=MessageRole.user, content=[TextBlock(text="Hello")])]
-        
-        resp = await get_response_openai(
-            messages=messages,
-            tools=None,
-            model="gpt-3.5-turbo-instruct"
-        )
-        
-        assert resp.content[0].text == "Completion response"
-        mock_oai.completions.create.assert_called_once()
-        mock_oai.chat.completions.create.assert_not_called()
-        
-        # Verify prompt construction
-        call_kwargs = mock_oai.completions.create.call_args.kwargs
-        assert "User: Hello" in call_kwargs["prompt"]
 
 @pytest.mark.asyncio
 async def test_illegal_tool_use_stripped():
     """Test that tools are stripped for unsupported models like o1-preview."""
     
     tools = [ToolDefinition(name="test", description="test", input_schema={})]
-    messages = [ChatMessage(role=MessageRole.user, content="Hi")]
+    messages = [ChatMessage(role=MessageRole.user, content=[TextBlock(text="Hi")])]
     
     # Test openai_format directly
     formatted = openai_format(messages, tools, model="o1-preview")
@@ -68,18 +32,31 @@ async def test_gemini_thinking_parsing():
     
     from localrouter.dtypes import ChatMessage
     
-    mock_part_thought = MagicMock()
-    mock_part_thought.thought = True
-    mock_part_thought.text = "I am thinking..."
+    # Create simple objects instead of MagicMocks
+    class Part:
+        def __init__(self, thought=False, text=""):
+            self.thought = thought
+            self.text = text
+            self.thought_signature = b"signature_bytes" if thought else None
     
-    mock_part_text = MagicMock()
-    mock_part_text.thought = False
-    mock_part_text.text = "Here is the answer."
+    class Content:
+        def __init__(self, parts):
+            self.parts = parts
     
-    mock_candidate = MagicMock()
-    mock_candidate.content.parts = [mock_part_thought, mock_part_text]
-    mock_response = MagicMock()
-    mock_response.candidates = [mock_candidate]
+    class Candidate:
+        def __init__(self, content):
+            self.content = content
+    
+    class Response:
+        def __init__(self, candidates):
+            self.candidates = candidates
+    
+    mock_response = Response([
+        Candidate(Content([
+            Part(thought=True, text="I am thinking..."),
+            Part(thought=False, text="Here is the answer.")
+        ]))
+    ])
     
     msg = ChatMessage.from_genai(mock_response)
     

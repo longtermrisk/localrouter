@@ -43,8 +43,9 @@ response = await get_response("meta-llama/llama-3.3-70b", messages)
 ```
 
 ### Reasoning/Thinking Support
-Added support for reasoning budgets across OpenAI, Anthropic, and Google Gemini models:
+Added comprehensive support for reasoning/thinking across OpenAI, Anthropic, and Google Gemini models:
 
+#### Configuration
 - **ReasoningConfig** class for configuring reasoning/thinking behavior
 - Supports three configuration styles:
   - `effort`: "minimal"/"low"/"medium"/"high" (OpenAI-style)
@@ -52,6 +53,36 @@ Added support for reasoning budgets across OpenAI, Anthropic, and Google Gemini 
   - `dynamic`: bool (Gemini-style, let model decide)
 - Automatic conversion between formats when switching providers
 - Graceful handling of models that don't support reasoning (config is ignored)
+
+#### Provider-Specific Behavior
+
+**OpenAI** (o1, o3-mini, GPT-5 when available):
+- Reasoning tokens are **hidden** (black box)
+- NOT included in response content
+- NOT sent back in conversation history
+- Status: ✅ Correctly implemented
+
+**Anthropic** (Claude Sonnet 3.7/4, Opus 4/4.1):
+- Thinking blocks are **visible** and returned in response
+- MUST be sent back in conversation history to maintain context
+- Includes signatures for state management
+- Status: ✅ Correctly implemented
+
+**Gemini** (2.5-pro, 2.5-flash):
+- Thought signatures embedded in Part objects (when thinking + tools used)
+- Signatures are **encrypted binary data** that MUST be preserved
+- Stored as base64 in `ToolUseBlock.thought_signature`
+- Automatically reconstructed when sending back to API
+- Status: ✅ Correctly implemented (as of Nov 2025)
+
+#### Implementation Details
+
+**Gemini Thought Signatures:**
+- Appear in responses when both thinking AND function declarations are present
+- Stored in the `Part` object's `thought_signature` field (type: bytes)
+- We extract and convert to base64 for JSON serialization
+- Reconstructed back to bytes when sending to Gemini API
+- Critical for multi-turn conversations with thinking + tools
 
 Example usage:
 ```python
@@ -66,7 +97,7 @@ response = await get_response(
 
 # Using explicit token budget
 response = await get_response(
-    model="claude-sonnet-4-20250514",  # When available
+    model="claude-sonnet-4-20250514",
     messages=messages,
     reasoning=ReasoningConfig(budget_tokens=8000)
 )
@@ -77,6 +108,17 @@ response = await get_response(
     messages=messages,
     reasoning={"effort": "medium"}
 )
+
+# Multi-turn with thinking + tools (signatures handled automatically)
+messages = [ChatMessage(...)]
+response1 = await get_response(
+    model="gemini-2.5-flash",
+    messages=messages,
+    tools=[calculator_tool],
+    reasoning=ReasoningConfig(budget_tokens=2000)
+)
+# Signatures are preserved in response1.content[...].thought_signature
+# Automatically sent back in next turn
 ```
 
 ## Updating this file

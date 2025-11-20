@@ -101,7 +101,7 @@ async def test_openai_thinking():
 
     # Test with o1-mini (has reasoning but no visible thinking blocks)
     response = await get_response(
-        model="o1-mini",
+        model="gpt-5-mini",
         messages=messages,
         reasoning=ReasoningConfig(effort="low"),  # o1 models use effort levels
         max_tokens=1000,
@@ -110,8 +110,8 @@ async def test_openai_thinking():
     thinking_blocks = [b for b in response.content if isinstance(b, ThinkingBlock)]
     text_blocks = [b for b in response.content if isinstance(b, TextBlock)]
 
-    print(f"o1-mini response has {len(thinking_blocks)} thinking blocks (expected: 0)")
-    print(f"o1-mini response has {len(text_blocks)} text blocks")
+    print(f"gpt5-mini response has {len(thinking_blocks)} thinking blocks (expected: 0)")
+    print(f"gpt5-mini response has {len(text_blocks)} text blocks")
 
     if text_blocks:
         print(f"Response: {text_blocks[0].text}")

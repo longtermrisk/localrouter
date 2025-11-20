@@ -40,10 +40,6 @@ from .dtypes import (
     ThinkingBlock,
 )
 
-from dotenv import load_dotenv
-
-load_dotenv()
-
 
 class Provider:
     def __init__(

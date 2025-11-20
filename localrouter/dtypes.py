@@ -253,6 +253,7 @@ class ToolUseBlock(BaseModel):
     name: str
     type: str = "tool_use"
     meta: Dict[str, Any] = Field(default_factory=dict)
+    thought_signature: Optional[str] = None  # For Gemini thought signatures (base64 encoded)
 
     def anthropic_format(self) -> Dict[str, Any]:
         return {
@@ -577,19 +578,32 @@ class ChatMessage(BaseModel):
                         blocks.append(ThinkingBlock(thinking=part.text))
                     elif hasattr(part, "text") and part.text:
                         blocks.append(TextBlock(text=part.text))
+                    
+                    # Check for function calls with thought signatures
+                    if hasattr(part, "function_call") and part.function_call:
+                        func_call = part.function_call
+                        func_id = getattr(func_call, "id", None) or str(uuid4())
+                        func_args = getattr(func_call, "args", {})
+                        
+                        # Extract thought signature if present (stored as bytes)
+                        thought_signature = None
+                        if hasattr(part, "thought_signature") and part.thought_signature:
+                            import base64
+                            # Convert bytes to base64 string for serialization
+                            thought_signature = base64.b64encode(part.thought_signature).decode('utf-8')
+                        
+                        blocks.append(
+                            ToolUseBlock(
+                                id=func_id, 
+                                name=func_call.name, 
+                                input=func_args,
+                                thought_signature=thought_signature
+                            )
+                        )
 
         # Fallback to simple text if no parts found
         if not blocks and response.text:
             blocks.append(TextBlock(text=response.text))
-
-        # Handle function calls
-        if hasattr(response, "function_calls") and response.function_calls:
-            for func_call in response.function_calls:
-                func_id = getattr(func_call, "id", None) or str(uuid4())
-                func_args = getattr(func_call, "args", {})
-                blocks.append(
-                    ToolUseBlock(id=func_id, name=func_call.name, input=func_args)
-                )
 
         return ChatMessage(role=MessageRole.assistant, content=blocks)
 
@@ -885,11 +899,27 @@ def genai_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any]:
                     )
                 )
             elif isinstance(block, ToolUseBlock):
-                parts.append(
-                    genai_types.Part.from_function_call(
-                        name=block.name, args=block.input or {}
+                # For Gemini, we need to reconstruct the Part with thought_signature if present
+                if block.thought_signature:
+                    import base64
+                    # Decode the base64 signature back to bytes
+                    signature_bytes = base64.b64decode(block.thought_signature)
+                    # Create Part with signature using model_validate
+                    part_dict = {
+                        "function_call": {
+                            "name": block.name,
+                            "args": block.input or {}
+                        },
+                        "thought_signature": signature_bytes
+                    }
+                    parts.append(genai_types.Part.model_validate(part_dict))
+                else:
+                    # No signature, use the standard method
+                    parts.append(
+                        genai_types.Part.from_function_call(
+                            name=block.name, args=block.input or {}
+                        )
                     )
-                )
             elif isinstance(block, ToolResultBlock):
                 # For tool results, handle both text and images
                 for content_block in block.content:

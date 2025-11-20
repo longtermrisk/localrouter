@@ -1,6 +1,6 @@
 [project]
 name = "localrouter"
-version = "0.2.7"
+version = "0.2.8"
 description = "Multi-provider LLM client with unified message format and tool support"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -41,7 +41,7 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 where = ["."]
-include = ["localrouter*"]
+include = ["localrouter", "localrouter.*"]
 
 [tool.black]
 line-length = 88
@@ -66,3 +66,8 @@ dev = [
     "black>=25.1.0",
     "pre-commit>=4.2.0",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
