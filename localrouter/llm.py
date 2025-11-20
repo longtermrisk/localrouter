@@ -131,6 +131,7 @@ def get_response_factory(oai: openai.AsyncOpenAI) -> Callable[..., Any]:
     return get_response_openai
 
 
+
 # ---------------------------------------------------------------------------
 # Google GenAI provider
 # ---------------------------------------------------------------------------
@@ -561,6 +562,40 @@ async def get_response_cached_with_backoff(
         reasoning=reasoning,
         **kwargs,
     )
+
+
+async def register_openai_client(oai):
+    models = await oai.models.list()
+    _available_openai_models = [
+        pretty_name(m.id)
+        for m in models.data
+    ]
+    providers.append(
+        Provider(
+            get_response_factory(oai),
+            models=_available_openai_models,
+            priority=10,
+        )
+    )
+
+
+def pretty_name(model_id):
+    _pretty = [
+        'gpt-oss-120b-GGUF',
+        'Qwen3-VL-30B-A3B-Instruct-GGUF',
+        'GLM-4.5-Air-4bit',
+        'Qwen3-Next-80B-A3B-Instruct-4bit'
+    ]
+    for candidate in _pretty:
+        if candidate.lower() in model_id.lower():
+            return candidate
+    return model_id
+
+
+async def register_local_server(base_url):
+    oai = openai.AsyncOpenAI(base_url=base_url, api_key="...")
+    await register_openai_client(oai)
+
 
 
 def print_available_models() -> None:
