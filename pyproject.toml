@@ -1,6 +1,6 @@
 [project]
 name = "localrouter"
-version = "0.2.9"
+version = "0.2.10"
 description = "Multi-provider LLM client with unified message format and tool support"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -28,6 +28,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+images = [
+    "Pillow>=10.0.0",
+]
 dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",

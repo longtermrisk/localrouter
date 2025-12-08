@@ -2,7 +2,7 @@ import os
 import json
 import base64
 from enum import Enum
-from typing import Any, Dict, List, Optional, Sequence, Union, Annotated
+from typing import Any, ClassVar, Dict, List, Optional, Sequence, Union, Annotated
 from uuid import uuid4
 from pydantic import BaseModel, Field, field_validator, Discriminator
 import yaml
@@ -217,6 +217,13 @@ class ImageBlock(BaseModel):
     type: str = "image"
     meta: Dict[str, Any] = Field(default_factory=dict)
 
+    # Anthropic's maximum image size is 5MB (5,242,880 bytes) for the BASE64 STRING
+    # Base64 encoding increases size by ~33% (4/3 ratio), so we need to target a smaller decoded size
+    # to ensure the base64 string stays under 5MB
+    ANTHROPIC_MAX_BASE64_SIZE: ClassVar[int] = 5 * 1024 * 1024
+    # Target decoded size: 5MB / (4/3) = 3.75MB, but use 3.7MB for safety margin
+    ANTHROPIC_MAX_DECODED_SIZE: ClassVar[int] = int(3.7 * 1024 * 1024)
+
     @staticmethod
     def from_base64(
         data: str, media_type: str = "image/png", meta=None
@@ -236,8 +243,127 @@ class ImageBlock(BaseModel):
             source=Base64ImageSource(data=base64_data, media_type=media_type, meta=meta)
         )
 
+    @staticmethod
+    def _resize_image_to_fit(image_data: bytes, max_size: int, media_type: str) -> tuple[bytes, str]:
+        """Resize an image to fit within the max_size limit.
+
+        Returns the resized image data and the media type (may change to JPEG for better compression).
+        """
+        try:
+            from PIL import Image
+            import io
+        except ImportError:
+            raise ImportError(
+                "Pillow is required for image resizing. Install with: pip install Pillow"
+            )
+
+        # Open the image
+        img = Image.open(io.BytesIO(image_data))
+        original_format = img.format or "PNG"
+
+        # Convert RGBA to RGB if saving as JPEG (JPEG doesn't support transparency)
+        output_format = original_format
+        output_media_type = media_type
+
+        # Try to save with current format first, then progressively reduce quality/size
+        current_data = image_data
+
+        # If the image has alpha channel and we need to compress aggressively, convert to JPEG
+        has_alpha = img.mode in ('RGBA', 'LA', 'PA') or (img.mode == 'P' and 'transparency' in img.info)
+
+        # First attempt: try reducing JPEG quality if it's a JPEG
+        if output_format.upper() == "JPEG" or (not has_alpha and len(current_data) > max_size):
+            if has_alpha:
+                img = img.convert('RGB')
+            output_format = "JPEG"
+            output_media_type = "image/jpeg"
+
+            for quality in [85, 70, 50, 30]:
+                buffer = io.BytesIO()
+                img.save(buffer, format="JPEG", quality=quality, optimize=True)
+                current_data = buffer.getvalue()
+                if len(current_data) <= max_size:
+                    return current_data, output_media_type
+
+        # If still too large or PNG, try resizing dimensions
+        scale_factors = [0.75, 0.5, 0.35, 0.25, 0.15, 0.1]
+        original_size = img.size
+
+        for scale in scale_factors:
+            new_width = int(original_size[0] * scale)
+            new_height = int(original_size[1] * scale)
+
+            if new_width < 100 or new_height < 100:
+                # Don't make images too small
+                continue
+
+            resized_img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
+
+            # Try saving as JPEG first (better compression) if no alpha
+            if not has_alpha:
+                rgb_img = resized_img.convert('RGB') if resized_img.mode != 'RGB' else resized_img
+                for quality in [85, 70, 50]:
+                    buffer = io.BytesIO()
+                    rgb_img.save(buffer, format="JPEG", quality=quality, optimize=True)
+                    current_data = buffer.getvalue()
+                    if len(current_data) <= max_size:
+                        logging.info(f"Resized image from {original_size} to {(new_width, new_height)} with JPEG quality {quality}")
+                        return current_data, "image/jpeg"
+
+            # Try PNG for images with transparency
+            buffer = io.BytesIO()
+            resized_img.save(buffer, format="PNG", optimize=True)
+            current_data = buffer.getvalue()
+            if len(current_data) <= max_size:
+                logging.info(f"Resized image from {original_size} to {(new_width, new_height)} as PNG")
+                return current_data, "image/png"
+
+        # Last resort: very small JPEG
+        if not has_alpha:
+            tiny_img = img.resize((100, int(100 * original_size[1] / original_size[0])), Image.Resampling.LANCZOS)
+            tiny_img = tiny_img.convert('RGB')
+            buffer = io.BytesIO()
+            tiny_img.save(buffer, format="JPEG", quality=30, optimize=True)
+            current_data = buffer.getvalue()
+            logging.warning(f"Image heavily compressed to fit within size limit")
+            return current_data, "image/jpeg"
+
+        raise ValueError(f"Unable to resize image to fit within {max_size} bytes")
+
     def anthropic_format(self) -> Dict[str, Any]:
-        return {"type": "image", "source": self.source.model_dump()}
+        """Convert to Anthropic format, automatically resizing if the image exceeds 5MB.
+
+        Note: Anthropic's 5MB limit applies to the BASE64 STRING, not the decoded binary.
+        Base64 encoding increases size by ~33%, so we check the base64 string length.
+        """
+        # Check base64 string size (this is what Anthropic checks)
+        base64_size = len(self.source.data)
+
+        if base64_size <= self.ANTHROPIC_MAX_BASE64_SIZE:
+            # Image is within limits, return as-is
+            return {"type": "image", "source": self.source.model_dump()}
+
+        # Image exceeds limit, resize it
+        image_data = base64.b64decode(self.source.data)
+        logging.info(f"Image base64 size ({base64_size} bytes) exceeds Anthropic limit ({self.ANTHROPIC_MAX_BASE64_SIZE} bytes), resizing...")
+
+        resized_data, new_media_type = self._resize_image_to_fit(
+            image_data,
+            self.ANTHROPIC_MAX_DECODED_SIZE,  # Target smaller decoded size to account for base64 overhead
+            self.source.media_type
+        )
+
+        new_base64 = base64.b64encode(resized_data).decode("utf-8")
+        logging.info(f"Resized image: decoded {len(image_data)} -> {len(resized_data)} bytes, base64 {base64_size} -> {len(new_base64)} bytes")
+
+        return {
+            "type": "image",
+            "source": {
+                "type": "base64",
+                "media_type": new_media_type,
+                "data": new_base64,
+            }
+        }
 
     def openai_format(self) -> Dict[str, Any]:
         data_url = f"data:{self.source.media_type};base64,{self.source.data}"
@@ -284,6 +410,27 @@ class ToolResultBlock(BaseModel):
     content: List[Union[TextBlock, ImageBlock]]
     type: str = "tool_result"
     meta: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("content", mode="before")
+    @classmethod
+    def convert_content_blocks(cls, v):
+        """Convert raw dicts to proper TextBlock/ImageBlock types"""
+        if not isinstance(v, list):
+            return v
+
+        result = []
+        for item in v:
+            if isinstance(item, (TextBlock, ImageBlock)):
+                result.append(item)
+            elif isinstance(item, dict):
+                block_type = item.get('type', 'text')
+                if block_type == 'image':
+                    result.append(ImageBlock(**item))
+                else:
+                    result.append(TextBlock(**item))
+            else:
+                result.append(item)
+        return result
 
     def anthropic_format(self) -> Dict[str, Any]:
         return {
