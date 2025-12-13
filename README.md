@@ -317,3 +317,70 @@ register_router(temperature_router)
 - **Input**: Dictionary with keys: `model`, `messages`, `tools`, `response_format`, `reasoning`, and any other kwargs
 - **Output**: String (new model name) or None (keep original model)
 - **Execution**: Routers are applied in registration order, and each router sees the model name from the previous router
+
+## Logging
+
+LocalRouter provides a flexible logging system to capture LLM requests and responses for debugging, monitoring, and analysis.
+
+### Basic Logging
+
+Register custom logger functions to receive request/response data:
+
+```python
+from localrouter import register_logger
+
+def my_logger(request, response, error):
+    """
+    request: Dict with model, messages, tools, etc.
+    response: ChatMessage object (None if error occurred)
+    error: Exception object (None if successful)
+    """
+    if error:
+        print(f"Error calling {request['model']}: {error}")
+    else:
+        print(f"Success: {request['model']} returned {len(response.content)} blocks")
+
+register_logger(my_logger)
+```
+
+### File-Based Logging
+
+Use the built-in `log_to_dir()` helper to automatically save requests and responses as JSON files:
+
+```python
+from localrouter import register_logger, log_to_dir
+
+# Log all requests to .llm/logs directory
+register_logger(log_to_dir('.llm/logs'))
+
+# Now all LLM calls will be logged
+response = await get_response(
+    model="gpt-4.1",
+    messages=messages
+)
+```
+
+Each log file contains:
+- Complete request parameters (model, messages, tools, etc.)
+- Full response with all content blocks
+- Error information if the request failed
+- Timestamp
+
+Log files are named: `{model-slug}_{timestamp}.json`
+
+### Multiple Loggers
+
+You can register multiple loggers that will all be called:
+
+```python
+# Log to disk
+register_logger(log_to_dir('.llm/logs'))
+
+# Also send to monitoring service
+def monitoring_logger(request, response, error):
+    send_to_datadog(request, response, error)
+
+register_logger(monitoring_logger)
+```
+
+**Note**: Logger errors are silently caught to prevent them from breaking your LLM calls.
