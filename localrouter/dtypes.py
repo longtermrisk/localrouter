@@ -137,11 +137,19 @@ class ToolDefinition(BaseModel):
     name: str
     description: str
     input_schema: Dict[str, Any]
+    strict: Optional[bool] = None  # For Anthropic structured outputs
 
     @property
     def anthropic_format(self):
         """Return the definition in Anthropic format"""
-        return self.model_dump()
+        result = {
+            "name": self.name,
+            "description": self.description,
+            "input_schema": self.input_schema,
+        }
+        if self.strict is not None:
+            result["strict"] = self.strict
+        return result
 
     @property
     def openai_format(self):

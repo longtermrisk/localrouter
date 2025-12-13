@@ -74,18 +74,95 @@ anthr = anthropic.AsyncAnthropic()
 async def get_response_anthropic(
     messages: List[ChatMessage],
     tools: Optional[List[ToolDefinition]],
-    response_format: Optional[Dict[str, Any]] = None,
+    response_format: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
     reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
     **kwargs: Any,
 ) -> ChatMessage:
-    if response_format is not None:
-        raise NotImplementedError(
-            "Structured output is not supported for Anthropic models"
-        )
-
     kwargs = anthropic_format(messages, tools, reasoning=reasoning, **kwargs)
     kwargs["timeout"] = 599
-    resp = await anthr.messages.create(**kwargs)
+
+    # Handle structured output with Pydantic model
+    if (
+        response_format is not None
+        and isinstance(response_format, type)
+        and issubclass(response_format, BaseModel)
+    ):
+        # Convert Pydantic model to JSON schema
+        try:
+            from anthropic import transform_schema
+            schema = transform_schema(response_format)
+        except (ImportError, AttributeError):
+            # Fallback: use Pydantic's json_schema method
+            from pydantic import TypeAdapter
+            schema = TypeAdapter(response_format).json_schema()
+
+            # Ensure all objects have additionalProperties: false
+            def add_additional_properties(obj):
+                if isinstance(obj, dict):
+                    if obj.get("type") == "object":
+                        obj["additionalProperties"] = False
+                    for value in obj.values():
+                        add_additional_properties(value)
+                elif isinstance(obj, list):
+                    for item in obj:
+                        add_additional_properties(item)
+
+            add_additional_properties(schema)
+
+        # Use beta.messages.create with output_format in extra_body
+        resp = await anthr.beta.messages.create(
+            betas=["structured-outputs-2025-11-13"],
+            extra_body={
+                "output_format": {
+                    "type": "json_schema",
+                    "schema": schema
+                }
+            },
+            **kwargs
+        )
+        response = ChatMessage.from_anthropic(resp.content)
+
+        # Try to parse the response
+        if response.content and len(response.content) > 0:
+            from .dtypes import TextBlock
+            text_blocks = [b for b in response.content if isinstance(b, TextBlock)]
+            if text_blocks:
+                try:
+                    parsed_data = json.loads(text_blocks[0].text)
+                    response.parsed = response_format(**parsed_data)
+                except Exception:
+                    pass
+
+        return response
+
+    # Handle structured output with dict schema
+    if response_format is not None and isinstance(response_format, dict):
+        # Use beta.messages.create with output_format in extra_body
+        resp = await anthr.beta.messages.create(
+            betas=["structured-outputs-2025-11-13"],
+            extra_body={
+                "output_format": {
+                    "type": "json_schema",
+                    "schema": response_format
+                }
+            },
+            **kwargs
+        )
+        response = ChatMessage.from_anthropic(resp.content)
+        return response
+
+    # Check if any tools have strict=True (strict tool use)
+    needs_beta = tools and any(getattr(tool, "strict", False) for tool in tools)
+
+    if needs_beta:
+        # Use beta.messages.create for strict tool use
+        resp = await anthr.beta.messages.create(
+            betas=["structured-outputs-2025-11-13"],
+            **kwargs
+        )
+    else:
+        # Standard request
+        resp = await anthr.messages.create(**kwargs)
 
     return ChatMessage.from_anthropic(resp.content)
 
