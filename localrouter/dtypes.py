@@ -617,6 +617,10 @@ class ChatMessage(BaseModel):
             if tool_calls:
                 oai_msg["tool_calls"] = tool_calls
 
+            # Restore OpenRouter reasoning_details for Gemini (needed for multi-turn)
+            if "reasoning_details" in self.meta:
+                oai_msg["reasoning_details"] = self.meta["reasoning_details"]
+
             if oai_msg["content"] is not None or tool_calls:
                 messages.append(oai_msg)
 
@@ -646,6 +650,7 @@ class ChatMessage(BaseModel):
     def from_openai(message, **kwargs) -> "ChatMessage":
         """Convert OpenAI message response to ChatMessage"""
         blocks = []
+        meta = {}
 
         # Handle content
         if message.content:
@@ -681,7 +686,11 @@ class ChatMessage(BaseModel):
                     )
                 )
 
-        return ChatMessage(role=MessageRole.assistant, content=blocks)
+        # Preserve OpenRouter reasoning_details for Gemini (needed for multi-turn)
+        if hasattr(message, "reasoning_details") and message.reasoning_details:
+            meta["reasoning_details"] = message.reasoning_details
+
+        return ChatMessage(role=MessageRole.assistant, content=blocks, meta=meta)
 
     @staticmethod
     def from_anthropic(response_content, **kwargs) -> "ChatMessage":
