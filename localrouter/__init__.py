@@ -26,6 +26,8 @@ from .llm import (
     providers,
     add_provider,
     register_router,
+    register_logger,
+    log_to_dir,
     print_available_models,
 )
 from .dtypes import (
@@ -59,6 +61,8 @@ __all__ = [
     "providers",
     "add_provider",
     "register_router",
+    "register_logger",
+    "log_to_dir",
     "print_available_models",
     "re",
     "openai_format",

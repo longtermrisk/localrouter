@@ -338,6 +338,107 @@ def register_router(router_func: Callable[[Dict[str, Any]], Optional[str]]) -> N
     """
     routers.append(router_func)
 
+
+# ---------------------------------------------------------------------------
+# Logger registration
+# ---------------------------------------------------------------------------
+
+loggers: List[Callable[[Dict[str, Any], Optional[ChatMessage], Optional[Exception]], None]] = []
+
+
+def register_logger(logger_func: Callable[[Dict[str, Any], Optional[ChatMessage], Optional[Exception]], None]) -> None:
+    """Register a logger function to log LLM requests and responses.
+
+    Logger functions receive three arguments:
+    - request: Dict containing all request parameters (model, messages, tools, etc.)
+    - response: The ChatMessage response (None if error occurred)
+    - error: The exception if one occurred (None if successful)
+
+    Args:
+        logger_func: Function that takes (request, response, error)
+
+    Example:
+        def my_logger(request, response, error):
+            if error:
+                print(f"Error for {request['model']}: {error}")
+            else:
+                print(f"Success for {request['model']}")
+
+        register_logger(my_logger)
+    """
+    loggers.append(logger_func)
+
+
+def log_to_dir(log_dir: str) -> Callable[[Dict[str, Any], Optional[ChatMessage], Optional[Exception]], None]:
+    """Create a logger that saves requests and responses to JSON files in a directory.
+
+    Args:
+        log_dir: Directory path to save log files (will be created if it doesn't exist)
+
+    Returns:
+        A logger function that can be passed to register_logger()
+
+    Example:
+        from localrouter import register_logger, log_to_dir
+        register_logger(log_to_dir('.llm/logs'))
+    """
+    from datetime import datetime
+
+    def logger(request: Dict[str, Any], response: Optional[ChatMessage] = None, error: Optional[Exception] = None) -> None:
+        try:
+            # Import slugify here to avoid adding it as a hard dependency
+            try:
+                from slugify import slugify
+            except ImportError:
+                # Fallback to simple slugification if python-slugify not available
+                def slugify(text):
+                    import re
+                    text = text.lower()
+                    text = re.sub(r'[^\w\s-]', '', text)
+                    text = re.sub(r'[-\s]+', '-', text)
+                    return text.strip('-')
+
+            os.makedirs(log_dir, exist_ok=True)
+
+            model = request.get('model', 'unknown')
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            filename = f"{slugify(model)}_{timestamp}.json"
+            filepath = os.path.join(log_dir, filename)
+
+            # Serialize request data
+            serialized_request = {}
+            for key, value in request.items():
+                if key == 'messages' and isinstance(value, list):
+                    serialized_request[key] = [msg.model_dump() if hasattr(msg, 'model_dump') else str(msg) for msg in value]
+                elif key == 'tools' and isinstance(value, list):
+                    serialized_request[key] = [tool.model_dump() if hasattr(tool, 'model_dump') else str(tool) for tool in value]
+                elif key == 'reasoning' and value is not None:
+                    serialized_request[key] = value.model_dump() if hasattr(value, 'model_dump') else str(value)
+                elif key == 'response_format' and value is not None:
+                    # Handle response_format which could be a type or dict
+                    if isinstance(value, type):
+                        serialized_request[key] = value.__name__
+                    else:
+                        serialized_request[key] = value
+                else:
+                    serialized_request[key] = value
+
+            log_data = {
+                'request': serialized_request,
+                'response': response.model_dump() if response else None,
+                'error': str(error) if error else None,
+                'timestamp': datetime.now().isoformat()
+            }
+
+            with open(filepath, 'w') as f:
+                json.dump(log_data, f, indent=2, default=str)
+        except Exception as e:
+            # Don't let logging errors break the main flow
+            print(f"Warning: Failed to write log: {e}")
+
+    return logger
+
+
 # Anthropic (priority 10 - higher priority than OpenRouter)
 try:
     _available_anthropic_models = [
@@ -451,23 +552,8 @@ async def get_response(
 
     # Use the highest priority provider
     provider = supporting_providers[0]
-    response = await provider.get_response(
-        model=model,
-        messages=messages,
-        tools=tools,
-        response_format=response_format,
-        reasoning=reasoning,
-        **kwargs,
-    )
 
-    # Handle empty responses
-    if len(response.content) == 0:
-        messages = messages + [
-            ChatMessage(
-                role=MessageRole.user,
-                content=[TextBlock(text="Please continue.")],
-            )
-        ]
+    try:
         response = await provider.get_response(
             model=model,
             messages=messages,
@@ -477,8 +563,41 @@ async def get_response(
             **kwargs,
         )
 
-    assert len(response.content) > 0, "Response content is empty"
-    return response
+        # Handle empty responses
+        if len(response.content) == 0:
+            messages = messages + [
+                ChatMessage(
+                    role=MessageRole.user,
+                    content=[TextBlock(text="Please continue.")],
+                )
+            ]
+            response = await provider.get_response(
+                model=model,
+                messages=messages,
+                tools=tools,
+                response_format=response_format,
+                reasoning=reasoning,
+                **kwargs,
+            )
+
+        assert len(response.content) > 0, "Response content is empty"
+
+        # Call registered loggers on success
+        for logger in loggers:
+            try:
+                logger(request_dict, response, None)
+            except Exception:
+                pass  # Don't let logger errors break the flow
+
+        return response
+    except Exception as e:
+        # Call registered loggers on error
+        for logger in loggers:
+            try:
+                logger(request_dict, None, e)
+            except Exception:
+                pass  # Don't let logger errors break the flow
+        raise
 
 
 @backoff.on_exception(
