@@ -127,6 +127,11 @@ class ThinkingBlock(BaseModel):
         return {"type": "text", "text": f"<thinking>{self.thinking}</thinking>"}
 
 
+class CacheControl(BaseModel):
+    """Cache control for Anthropic prompt caching."""
+    type: str = "ephemeral"
+
+
 class ToolDefinition(BaseModel):
     """Class for structured JSON response format that can be used as a tool for judges
 
@@ -138,6 +143,7 @@ class ToolDefinition(BaseModel):
     description: str
     input_schema: Dict[str, Any]
     strict: Optional[bool] = None  # For Anthropic structured outputs
+    cache_control: Optional[CacheControl] = None  # For Anthropic prompt caching
 
     @property
     def anthropic_format(self):
@@ -149,6 +155,8 @@ class ToolDefinition(BaseModel):
         }
         if self.strict is not None:
             result["strict"] = self.strict
+        if self.cache_control is not None:
+            result["cache_control"] = self.cache_control.model_dump()
         return result
 
     @property
@@ -194,12 +202,16 @@ class TextBlock(BaseModel):
     text: str
     type: str = "text"
     meta: Dict[str, Any] = Field(default_factory=dict)
+    cache_control: Optional[CacheControl] = None
 
     def anthropic_format(self) -> Dict[str, Any]:
-        return {
+        result = {
             "type": "text",
             "text": self.text,
         }
+        if self.cache_control:
+            result["cache_control"] = self.cache_control.model_dump()
+        return result
 
     def openai_format(self) -> Dict[str, Any]:
         return {
@@ -224,6 +236,7 @@ class ImageBlock(BaseModel):
     source: Base64ImageSource
     type: str = "image"
     meta: Dict[str, Any] = Field(default_factory=dict)
+    cache_control: Optional[CacheControl] = None
 
     # Anthropic's maximum image size is 5MB (5,242,880 bytes) for the BASE64 STRING
     # Base64 encoding increases size by ~33% (4/3 ratio), so we need to target a smaller decoded size
@@ -349,7 +362,10 @@ class ImageBlock(BaseModel):
 
         if base64_size <= self.ANTHROPIC_MAX_BASE64_SIZE:
             # Image is within limits, return as-is
-            return {"type": "image", "source": self.source.model_dump()}
+            result = {"type": "image", "source": self.source.model_dump()}
+            if self.cache_control:
+                result["cache_control"] = self.cache_control.model_dump()
+            return result
 
         # Image exceeds limit, resize it
         image_data = base64.b64decode(self.source.data)
@@ -364,7 +380,7 @@ class ImageBlock(BaseModel):
         new_base64 = base64.b64encode(resized_data).decode("utf-8")
         logging.info(f"Resized image: decoded {len(image_data)} -> {len(resized_data)} bytes, base64 {base64_size} -> {len(new_base64)} bytes")
 
-        return {
+        result = {
             "type": "image",
             "source": {
                 "type": "base64",
@@ -372,6 +388,9 @@ class ImageBlock(BaseModel):
                 "data": new_base64,
             }
         }
+        if self.cache_control:
+            result["cache_control"] = self.cache_control.model_dump()
+        return result
 
     def openai_format(self) -> Dict[str, Any]:
         data_url = f"data:{self.source.media_type};base64,{self.source.data}"
@@ -388,14 +407,18 @@ class ToolUseBlock(BaseModel):
     type: str = "tool_use"
     meta: Dict[str, Any] = Field(default_factory=dict)
     thought_signature: Optional[str] = None  # For Gemini thought signatures (base64 encoded)
+    cache_control: Optional[CacheControl] = None
 
     def anthropic_format(self) -> Dict[str, Any]:
-        return {
+        result = {
             "type": "tool_use",
             "id": self.id,
             "name": self.name,
             "input": self.input,
         }
+        if self.cache_control:
+            result["cache_control"] = self.cache_control.model_dump()
+        return result
 
     def openai_format(self) -> Dict[str, Any]:
         return {
@@ -418,6 +441,7 @@ class ToolResultBlock(BaseModel):
     content: List[Union[TextBlock, ImageBlock]]
     type: str = "tool_result"
     meta: Dict[str, Any] = Field(default_factory=dict)
+    cache_control: Optional[CacheControl] = None
 
     @field_validator("content", mode="before")
     @classmethod
@@ -441,11 +465,14 @@ class ToolResultBlock(BaseModel):
         return result
 
     def anthropic_format(self) -> Dict[str, Any]:
-        return {
+        result = {
             "type": "tool_result",
             "tool_use_id": self.tool_use_id,
             "content": [block.anthropic_format() for block in self.content],
         }
+        if self.cache_control:
+            result["cache_control"] = self.cache_control.model_dump()
+        return result
 
     def openai_format(self) -> Dict[str, Any]:
         # OpenAI tool results only support text content, so we need to handle images differently
@@ -939,18 +966,42 @@ class PromptTemplate(BaseModel):
 
 
 def anthropic_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any]:
-    """Convert our internal chat representation into a payload suitable for Anthropic."""
-    system_message = None
+    """Convert our internal chat representation into a payload suitable for Anthropic.
+    
+    Supports Anthropic's prompt caching by:
+    - Using structured system message format (array of content blocks)
+    - Preserving cache_control on system message blocks, tools, and message content
+    """
+    system_blocks = None
     chat_messages = []
 
     if len(messages) > 0 and messages[0].role == MessageRole.system:
-        system_message = "\n".join(
-            [
-                block.text
-                for block in messages[0].content
-                if isinstance(block, TextBlock)
-            ]
+        # Convert system message to structured format for caching support
+        # Check if any block has cache_control - if so, use structured format
+        has_cache_control = any(
+            getattr(block, 'cache_control', None) is not None
+            for block in messages[0].content
+            if isinstance(block, TextBlock)
         )
+        
+        if has_cache_control:
+            # Use structured array format with cache_control
+            system_blocks = []
+            for block in messages[0].content:
+                if isinstance(block, TextBlock):
+                    block_dict = {"type": "text", "text": block.text}
+                    if block.cache_control:
+                        block_dict["cache_control"] = block.cache_control.model_dump()
+                    system_blocks.append(block_dict)
+        else:
+            # Use simple string format (no caching)
+            system_blocks = "\n".join(
+                [
+                    block.text
+                    for block in messages[0].content
+                    if isinstance(block, TextBlock)
+                ]
+            )
         chat_messages = [msg.anthropic_format() for msg in messages[1:]]
     else:
         chat_messages = [msg.anthropic_format() for msg in messages]
@@ -958,8 +1009,8 @@ def anthropic_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any
     kwargs["messages"] = chat_messages
     if tools:
         kwargs["tools"] = [tool.anthropic_format for tool in tools]
-    if system_message:
-        kwargs["system"] = system_message
+    if system_blocks:
+        kwargs["system"] = system_blocks
 
     if not "max_tokens" in kwargs:
         kwargs["max_tokens"] = 32000

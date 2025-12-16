@@ -1,6 +1,6 @@
 [project]
 name = "localrouter"
-version = "0.2.13"
+version = "0.2.14"
 description = "Multi-provider LLM client with unified message format and tool support"
 readme = "README.md"
 requires-python = ">=3.11"

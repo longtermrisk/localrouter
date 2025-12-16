@@ -16,6 +16,7 @@ from .dtypes import (
     ContentBlock,
     Base64ImageSource,
     ReasoningConfig,
+    CacheControl,
 )
 
 from .llm import (
@@ -54,6 +55,7 @@ __all__ = [
     "ContentBlock",
     "Base64ImageSource",
     "ReasoningConfig",
+    "CacheControl",
     "get_response",
     "get_response_with_backoff",
     "get_response_cached",
