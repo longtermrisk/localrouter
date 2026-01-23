@@ -678,7 +678,60 @@ def add_provider(
 dcache = DCache(cache_dir=os.path.expanduser("~/.cache/localrouter"))
 
 
-@dcache(required_kwargs=["cache_seed"])
+def _serialize_chat_message(response: ChatMessage) -> ChatMessage:
+    """Convert .parsed Pydantic model to dict for pickling."""
+    if hasattr(response, 'parsed') and response.parsed is not None:
+        parsed = response.parsed
+        if hasattr(parsed, 'model_dump'):
+            # Pydantic v2 - convert to dict
+            response.parsed = parsed.model_dump()
+        elif hasattr(parsed, 'dict'):
+            # Pydantic v1 - convert to dict
+            response.parsed = parsed.dict()
+    return response
+
+
+def _reconstruct_parsed(response: ChatMessage, response_format: Optional[Type[BaseModel]]) -> ChatMessage:
+    """Reconstruct .parsed as a Pydantic model if it was serialized as a dict during caching."""
+    if (
+        response_format is not None
+        and isinstance(response_format, type)
+        and issubclass(response_format, BaseModel)
+        and hasattr(response, 'parsed')
+        and response.parsed is not None
+        and isinstance(response.parsed, dict)
+    ):
+        try:
+            response.parsed = response_format(**response.parsed)
+        except Exception:
+            pass  # Keep as dict if reconstruction fails
+    return response
+
+
+@dcache(required_kwargs=["cache_seed"], serializer=_serialize_chat_message)
+async def _get_response_cached_impl(
+    model: str,
+    messages: List[ChatMessage],
+    tools: Optional[List[ToolDefinition]] = None,
+    response_format: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
+    reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
+    cache_seed: Optional[int] = None,
+    **kwargs: Any,
+) -> ChatMessage:
+    """Internal cached implementation."""
+    if reasoning and isinstance(reasoning, dict):
+        reasoning = ReasoningConfig(**reasoning)
+
+    return await get_response(
+        model,
+        messages,
+        tools=tools,
+        response_format=response_format,
+        reasoning=reasoning,
+        **kwargs,
+    )
+
+
 async def get_response_cached(
     model: str,
     messages: List[ChatMessage],
@@ -705,11 +758,33 @@ async def get_response_cached(
     Raises:
         ValueError: If the specified model is not supported by any provider
     """
-    # Convert dict to ReasoningConfig if needed
+    response = await _get_response_cached_impl(
+        model=model,
+        messages=messages,
+        tools=tools,
+        response_format=response_format,
+        reasoning=reasoning,
+        cache_seed=cache_seed,
+        **kwargs,
+    )
+    return _reconstruct_parsed(response, response_format)
+
+
+@dcache(required_kwargs=["cache_seed"], serializer=_serialize_chat_message)
+async def _get_response_cached_with_backoff_impl(
+    model: str,
+    messages: List[ChatMessage],
+    tools: Optional[List[ToolDefinition]] = None,
+    response_format: Optional[Union[Dict[str, Any], Type[BaseModel]]] = None,
+    reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
+    cache_seed: Optional[int] = None,
+    **kwargs: Any,
+) -> ChatMessage:
+    """Internal cached implementation with backoff."""
     if reasoning and isinstance(reasoning, dict):
         reasoning = ReasoningConfig(**reasoning)
 
-    return await get_response(
+    return await get_response_with_backoff(
         model,
         messages,
         tools=tools,
@@ -719,7 +794,6 @@ async def get_response_cached(
     )
 
 
-@dcache(required_kwargs=["cache_seed"])
 async def get_response_cached_with_backoff(
     model: str,
     messages: List[ChatMessage],
@@ -746,18 +820,16 @@ async def get_response_cached_with_backoff(
     Raises:
         ValueError: If the specified model is not supported by any provider
     """
-    # Convert dict to ReasoningConfig if needed
-    if reasoning and isinstance(reasoning, dict):
-        reasoning = ReasoningConfig(**reasoning)
-
-    return await get_response_with_backoff(
-        model,
-        messages,
+    response = await _get_response_cached_with_backoff_impl(
+        model=model,
+        messages=messages,
         tools=tools,
         response_format=response_format,
         reasoning=reasoning,
+        cache_seed=cache_seed,
         **kwargs,
     )
+    return _reconstruct_parsed(response, response_format)
 
 
 async def register_openai_client(oai):

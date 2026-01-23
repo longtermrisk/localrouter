@@ -1,6 +1,6 @@
 [project]
 name = "localrouter"
-version = "0.2.14"
+version = "0.2.15"
 description = "Multi-provider LLM client with unified message format and tool support"
 readme = "README.md"
 requires-python = ">=3.11"
@@ -23,7 +23,7 @@ dependencies = [
     "pydantic>=2.7.0",
     "python-dotenv>=1.0.0",
     "pyyaml>=6.0.2",
-    "cache_on_disk>=0.4.0",
+    "cache_on_disk>=0.5.0",
     "google-genai>=1.26.0"
 ]
 
