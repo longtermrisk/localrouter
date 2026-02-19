@@ -22,6 +22,7 @@ except ImportError:
     genai = None
     genai_types = None
 
+import yaml
 import json
 import backoff
 from typing import Dict, Any
@@ -39,6 +40,101 @@ from .dtypes import (
     ReasoningConfig,
     ThinkingBlock,
 )
+
+
+# ---------------------------------------------------------------------------
+# Config loading (global ~/.localrouter.yaml, local .localrouter.yaml)
+# ---------------------------------------------------------------------------
+
+# Built-in defaults: route to official/first-party providers only
+_DEFAULT_OPENROUTER_PROVIDERS: Dict[str, Dict[str, Any]] = {
+    "qwen": {
+        "only": ["alibaba"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+    },
+    "deepseek": {
+        "only": ["deepseek"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+    },
+    "minimax": {
+        "only": ["minimax"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+    },
+    "x-ai": {
+        "only": ["xai"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+    },
+    "moonshotai": {
+        "only": ["moonshotai"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+    },
+    "mistralai": {
+        "only": ["mistral"],
+        "allow_fallbacks": False,
+        "require_parameters": True,
+    },
+}
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    """Merge override into base, with override taking precedence."""
+    result = base.copy()
+    for key, value in override.items():
+        if key in result and isinstance(result[key], dict) and isinstance(value, dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = value
+    return result
+
+
+def _load_config() -> Dict[str, Any]:
+    """Load config from ~/.localrouter.yaml (global) and .localrouter.yaml (local).
+
+    Local config overrides global config via deep merge.
+    Built-in defaults are used as the base.
+    """
+    config: Dict[str, Any] = {
+        "openrouter": {"providers": _DEFAULT_OPENROUTER_PROVIDERS.copy()}
+    }
+
+    # Load global config
+    global_path = os.path.expanduser("~/.localrouter.yaml")
+    if os.path.exists(global_path):
+        try:
+            with open(global_path) as f:
+                global_config = yaml.safe_load(f) or {}
+            config = _deep_merge(config, global_config)
+        except Exception:
+            pass
+
+    # Load local config (overrides global)
+    local_path = os.path.join(os.getcwd(), ".localrouter.yaml")
+    if os.path.exists(local_path):
+        try:
+            with open(local_path) as f:
+                local_config = yaml.safe_load(f) or {}
+            config = _deep_merge(config, local_config)
+        except Exception:
+            pass
+
+    return config
+
+
+_config = _load_config()
+
+
+def _get_openrouter_provider_prefs(model: str) -> Optional[Dict[str, Any]]:
+    """Get OpenRouter provider preferences for a model based on its org prefix."""
+    if "/" not in model:
+        return None
+    prefix = model.split("/")[0]
+    providers_config = _config.get("openrouter", {}).get("providers", {})
+    return providers_config.get(prefix)
 
 
 class Provider:
@@ -90,10 +186,12 @@ async def get_response_anthropic(
         # Convert Pydantic model to JSON schema
         try:
             from anthropic import transform_schema
+
             schema = transform_schema(response_format)
         except (ImportError, AttributeError):
             # Fallback: use Pydantic's json_schema method
             from pydantic import TypeAdapter
+
             schema = TypeAdapter(response_format).json_schema()
 
             # Ensure all objects have additionalProperties: false
@@ -112,19 +210,15 @@ async def get_response_anthropic(
         # Use beta.messages.create with output_format in extra_body
         resp = await anthr.beta.messages.create(
             betas=["structured-outputs-2025-11-13"],
-            extra_body={
-                "output_format": {
-                    "type": "json_schema",
-                    "schema": schema
-                }
-            },
-            **kwargs
+            extra_body={"output_format": {"type": "json_schema", "schema": schema}},
+            **kwargs,
         )
         response = ChatMessage.from_anthropic(resp.content)
 
         # Try to parse the response
         if response.content and len(response.content) > 0:
             from .dtypes import TextBlock
+
             text_blocks = [b for b in response.content if isinstance(b, TextBlock)]
             if text_blocks:
                 try:
@@ -141,12 +235,9 @@ async def get_response_anthropic(
         resp = await anthr.beta.messages.create(
             betas=["structured-outputs-2025-11-13"],
             extra_body={
-                "output_format": {
-                    "type": "json_schema",
-                    "schema": response_format
-                }
+                "output_format": {"type": "json_schema", "schema": response_format}
             },
-            **kwargs
+            **kwargs,
         )
         response = ChatMessage.from_anthropic(resp.content)
         return response
@@ -157,8 +248,7 @@ async def get_response_anthropic(
     if needs_beta:
         # Use beta.messages.create for strict tool use
         resp = await anthr.beta.messages.create(
-            betas=["structured-outputs-2025-11-13"],
-            **kwargs
+            betas=["structured-outputs-2025-11-13"], **kwargs
         )
     else:
         # Standard request
@@ -172,7 +262,10 @@ async def get_response_anthropic(
 # ---------------------------------------------------------------------------
 
 
-def get_response_factory(oai: openai.AsyncOpenAI) -> Callable[..., Any]:
+def get_response_factory(
+    oai: openai.AsyncOpenAI,
+    extra_body_fn: Optional[Callable[[str], Optional[Dict[str, Any]]]] = None,
+) -> Callable[..., Any]:
     async def get_response_openai(
         messages: List[ChatMessage],
         tools: Optional[List[ToolDefinition]],
@@ -184,6 +277,15 @@ def get_response_factory(oai: openai.AsyncOpenAI) -> Callable[..., Any]:
 
         if "model" not in kwargs:
             raise ValueError("'model' is required for OpenAI completions")
+
+        # Inject extra_body (e.g. OpenRouter provider preferences)
+        if extra_body_fn:
+            extra = extra_body_fn(kwargs.get("model", ""))
+            if extra:
+                kwargs["extra_body"] = {
+                    **kwargs.get("extra_body", {}),
+                    **extra,
+                }
 
         # Handle structured output
         if (
@@ -208,7 +310,6 @@ def get_response_factory(oai: openai.AsyncOpenAI) -> Callable[..., Any]:
     return get_response_openai
 
 
-
 # ---------------------------------------------------------------------------
 # Google GenAI provider
 # ---------------------------------------------------------------------------
@@ -221,9 +322,11 @@ async def get_response_genai(
     reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
     **kwargs: Any,
 ) -> ChatMessage:
-    
+
     if genai is None:
-        raise ImportError("google-genai package is required for Google GenAI support. Install with: pip install google-genai")
+        raise ImportError(
+            "google-genai package is required for Google GenAI support. Install with: pip install google-genai"
+        )
 
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
@@ -343,10 +446,16 @@ def register_router(router_func: Callable[[Dict[str, Any]], Optional[str]]) -> N
 # Logger registration
 # ---------------------------------------------------------------------------
 
-loggers: List[Callable[[Dict[str, Any], Optional[ChatMessage], Optional[Exception]], None]] = []
+loggers: List[
+    Callable[[Dict[str, Any], Optional[ChatMessage], Optional[Exception]], None]
+] = []
 
 
-def register_logger(logger_func: Callable[[Dict[str, Any], Optional[ChatMessage], Optional[Exception]], None]) -> None:
+def register_logger(
+    logger_func: Callable[
+        [Dict[str, Any], Optional[ChatMessage], Optional[Exception]], None
+    ],
+) -> None:
     """Register a logger function to log LLM requests and responses.
 
     Logger functions receive three arguments:
@@ -369,7 +478,9 @@ def register_logger(logger_func: Callable[[Dict[str, Any], Optional[ChatMessage]
     loggers.append(logger_func)
 
 
-def log_to_dir(log_dir: str) -> Callable[[Dict[str, Any], Optional[ChatMessage], Optional[Exception]], None]:
+def log_to_dir(
+    log_dir: str,
+) -> Callable[[Dict[str, Any], Optional[ChatMessage], Optional[Exception]], None]:
     """Create a logger that saves requests and responses to JSON files in a directory.
 
     Args:
@@ -384,7 +495,11 @@ def log_to_dir(log_dir: str) -> Callable[[Dict[str, Any], Optional[ChatMessage],
     """
     from datetime import datetime
 
-    def logger(request: Dict[str, Any], response: Optional[ChatMessage] = None, error: Optional[Exception] = None) -> None:
+    def logger(
+        request: Dict[str, Any],
+        response: Optional[ChatMessage] = None,
+        error: Optional[Exception] = None,
+    ) -> None:
         try:
             # Import slugify here to avoid adding it as a hard dependency
             try:
@@ -393,28 +508,39 @@ def log_to_dir(log_dir: str) -> Callable[[Dict[str, Any], Optional[ChatMessage],
                 # Fallback to simple slugification if python-slugify not available
                 def slugify(text):
                     import re
+
                     text = text.lower()
-                    text = re.sub(r'[^\w\s-]', '', text)
-                    text = re.sub(r'[-\s]+', '-', text)
-                    return text.strip('-')
+                    text = re.sub(r"[^\w\s-]", "", text)
+                    text = re.sub(r"[-\s]+", "-", text)
+                    return text.strip("-")
 
             os.makedirs(log_dir, exist_ok=True)
 
-            model = request.get('model', 'unknown')
-            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S_%f')
+            model = request.get("model", "unknown")
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
             filename = f"{slugify(model)}_{timestamp}.json"
             filepath = os.path.join(log_dir, filename)
 
             # Serialize request data
             serialized_request = {}
             for key, value in request.items():
-                if key == 'messages' and isinstance(value, list):
-                    serialized_request[key] = [msg.model_dump() if hasattr(msg, 'model_dump') else str(msg) for msg in value]
-                elif key == 'tools' and isinstance(value, list):
-                    serialized_request[key] = [tool.model_dump() if hasattr(tool, 'model_dump') else str(tool) for tool in value]
-                elif key == 'reasoning' and value is not None:
-                    serialized_request[key] = value.model_dump() if hasattr(value, 'model_dump') else str(value)
-                elif key == 'response_format' and value is not None:
+                if key == "messages" and isinstance(value, list):
+                    serialized_request[key] = [
+                        msg.model_dump() if hasattr(msg, "model_dump") else str(msg)
+                        for msg in value
+                    ]
+                elif key == "tools" and isinstance(value, list):
+                    serialized_request[key] = [
+                        tool.model_dump() if hasattr(tool, "model_dump") else str(tool)
+                        for tool in value
+                    ]
+                elif key == "reasoning" and value is not None:
+                    serialized_request[key] = (
+                        value.model_dump()
+                        if hasattr(value, "model_dump")
+                        else str(value)
+                    )
+                elif key == "response_format" and value is not None:
                     # Handle response_format which could be a type or dict
                     if isinstance(value, type):
                         serialized_request[key] = value.__name__
@@ -424,13 +550,13 @@ def log_to_dir(log_dir: str) -> Callable[[Dict[str, Any], Optional[ChatMessage],
                     serialized_request[key] = value
 
             log_data = {
-                'request': serialized_request,
-                'response': response.model_dump() if response else None,
-                'error': str(error) if error else None,
-                'timestamp': datetime.now().isoformat()
+                "request": serialized_request,
+                "response": response.model_dump() if response else None,
+                "error": str(error) if error else None,
+                "timestamp": datetime.now().isoformat(),
             }
 
-            with open(filepath, 'w') as f:
+            with open(filepath, "w") as f:
                 json.dump(log_data, f, indent=2, default=str)
         except Exception as e:
             # Don't let logging errors break the main flow
@@ -482,13 +608,21 @@ if "GEMINI_API_KEY" in os.environ or "GOOGLE_API_KEY" in os.environ:
 
 # OpenRouter (priority 1000 - lowest priority, fallback for models with "/")
 if "OPENROUTER_API_KEY" in os.environ:
+
+    def _openrouter_extra_body(model: str) -> Optional[Dict[str, Any]]:
+        prefs = _get_openrouter_provider_prefs(model)
+        if prefs:
+            return {"provider": prefs}
+        return None
+
     providers.append(
         Provider(
             get_response_factory(
                 openai.AsyncOpenAI(
                     api_key=os.environ["OPENROUTER_API_KEY"],
                     base_url="https://openrouter.ai/api/v1",
-                )
+                ),
+                extra_body_fn=_openrouter_extra_body,
             ),
             models=[re.compile(r".+/.+")],  # Matches any model with "/" in the name
             priority=1000,
@@ -611,7 +745,7 @@ async def get_response(
         anthropic.RateLimitError,
         anthropic.APIStatusError,
         # Conditionally handle GenAI errors
-        *( (genai.errors.ClientError, genai.errors.ServerError) if genai else () ),
+        *((genai.errors.ClientError, genai.errors.ServerError) if genai else ()),
         TypeError,
         AssertionError,
     ),
@@ -680,24 +814,26 @@ dcache = DCache(cache_dir=os.path.expanduser("~/.cache/localrouter"))
 
 def _serialize_chat_message(response: ChatMessage) -> ChatMessage:
     """Convert .parsed Pydantic model to dict for pickling."""
-    if hasattr(response, 'parsed') and response.parsed is not None:
+    if hasattr(response, "parsed") and response.parsed is not None:
         parsed = response.parsed
-        if hasattr(parsed, 'model_dump'):
+        if hasattr(parsed, "model_dump"):
             # Pydantic v2 - convert to dict
             response.parsed = parsed.model_dump()
-        elif hasattr(parsed, 'dict'):
+        elif hasattr(parsed, "dict"):
             # Pydantic v1 - convert to dict
             response.parsed = parsed.dict()
     return response
 
 
-def _reconstruct_parsed(response: ChatMessage, response_format: Optional[Type[BaseModel]]) -> ChatMessage:
+def _reconstruct_parsed(
+    response: ChatMessage, response_format: Optional[Type[BaseModel]]
+) -> ChatMessage:
     """Reconstruct .parsed as a Pydantic model if it was serialized as a dict during caching."""
     if (
         response_format is not None
         and isinstance(response_format, type)
         and issubclass(response_format, BaseModel)
-        and hasattr(response, 'parsed')
+        and hasattr(response, "parsed")
         and response.parsed is not None
         and isinstance(response.parsed, dict)
     ):
@@ -834,10 +970,7 @@ async def get_response_cached_with_backoff(
 
 async def register_openai_client(oai):
     models = await oai.models.list()
-    _available_openai_models = [
-        pretty_name(m.id)
-        for m in models.data
-    ]
+    _available_openai_models = [pretty_name(m.id) for m in models.data]
     providers.append(
         Provider(
             get_response_factory(oai),
@@ -849,10 +982,10 @@ async def register_openai_client(oai):
 
 def pretty_name(model_id):
     _pretty = [
-        'gpt-oss-120b-GGUF',
-        'Qwen3-VL-30B-A3B-Instruct-GGUF',
-        'GLM-4.5-Air-4bit',
-        'Qwen3-Next-80B-A3B-Instruct-4bit'
+        "gpt-oss-120b-GGUF",
+        "Qwen3-VL-30B-A3B-Instruct-GGUF",
+        "GLM-4.5-Air-4bit",
+        "Qwen3-Next-80B-A3B-Instruct-4bit",
     ]
     for candidate in _pretty:
         if candidate.lower() in model_id.lower():
@@ -863,7 +996,6 @@ def pretty_name(model_id):
 async def register_local_server(base_url):
     oai = openai.AsyncOpenAI(base_url=base_url, api_key="...")
     await register_openai_client(oai)
-
 
 
 def print_available_models() -> None:
@@ -882,7 +1014,9 @@ def print_available_models() -> None:
     print("=" * 80)
 
     for i, provider in enumerate(sorted_providers, 1):
-        provider_name = provider.get_response.__name__.replace("get_response_", "").title()
+        provider_name = provider.get_response.__name__.replace(
+            "get_response_", ""
+        ).title()
         print(f"\n{i}. {provider_name} (Priority: {provider.priority})")
         print("-" * 80)
 
