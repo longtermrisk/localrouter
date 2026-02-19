@@ -601,7 +601,14 @@ if "GEMINI_API_KEY" in os.environ or "GOOGLE_API_KEY" in os.environ:
     providers.append(
         Provider(
             get_response_genai,
-            models=["gemini-2.5-pro", "gemini-2.5-flash", "gemini-3-pro-preview"],
+            models=[
+                "gemini-2.5-pro",
+                "gemini-2.5-flash",
+                "gemini-3-pro-preview",
+                "gemini-3-flash-preview",
+                "gemini-3.1-pro",
+                r"gemini-.*",
+            ],
             priority=10,
         )
     )
