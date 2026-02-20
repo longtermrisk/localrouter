@@ -14,13 +14,9 @@ import re
 import anthropic
 import openai
 
-# Conditional import for google-genai
-try:
-    from google import genai
-    from google.genai import types as genai_types
-except ImportError:
-    genai = None
-    genai_types = None
+from google import genai
+from google.genai import types as genai_types
+from datetime import datetime
 
 import yaml
 import json
@@ -188,28 +184,22 @@ async def get_response_anthropic(
         and issubclass(response_format, BaseModel)
     ):
         # Convert Pydantic model to JSON schema
-        try:
-            from anthropic import transform_schema
+        from pydantic import TypeAdapter
 
-            schema = transform_schema(response_format)
-        except (ImportError, AttributeError):
-            # Fallback: use Pydantic's json_schema method
-            from pydantic import TypeAdapter
+        schema = TypeAdapter(response_format).json_schema()
 
-            schema = TypeAdapter(response_format).json_schema()
+        # Ensure all objects have additionalProperties: false
+        def add_additional_properties(obj):
+            if isinstance(obj, dict):
+                if obj.get("type") == "object":
+                    obj["additionalProperties"] = False
+                for value in obj.values():
+                    add_additional_properties(value)
+            elif isinstance(obj, list):
+                for item in obj:
+                    add_additional_properties(item)
 
-            # Ensure all objects have additionalProperties: false
-            def add_additional_properties(obj):
-                if isinstance(obj, dict):
-                    if obj.get("type") == "object":
-                        obj["additionalProperties"] = False
-                    for value in obj.values():
-                        add_additional_properties(value)
-                elif isinstance(obj, list):
-                    for item in obj:
-                        add_additional_properties(item)
-
-            add_additional_properties(schema)
+        add_additional_properties(schema)
 
         # Use beta.messages.create with output_format in extra_body
         resp = await anthr.beta.messages.create(
@@ -221,8 +211,6 @@ async def get_response_anthropic(
 
         # Try to parse the response
         if response.content and len(response.content) > 0:
-            from .dtypes import TextBlock
-
             text_blocks = [b for b in response.content if isinstance(b, TextBlock)]
             if text_blocks:
                 try:
@@ -326,11 +314,6 @@ async def get_response_genai(
     reasoning: Optional[Union[ReasoningConfig, Dict[str, Any]]] = None,
     **kwargs: Any,
 ) -> ChatMessage:
-
-    if genai is None:
-        raise ImportError(
-            "google-genai package is required for Google GenAI support. Install with: pip install google-genai"
-        )
 
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
@@ -497,7 +480,12 @@ def log_to_dir(
         from localrouter import register_logger, log_to_dir
         register_logger(log_to_dir('.llm/logs'))
     """
-    from datetime import datetime
+
+    def _slugify(text):
+        text = text.lower()
+        text = re.sub(r"[^\w\s-]", "", text)
+        text = re.sub(r"[-\s]+", "-", text)
+        return text.strip("-")
 
     def logger(
         request: Dict[str, Any],
@@ -505,24 +493,11 @@ def log_to_dir(
         error: Optional[Exception] = None,
     ) -> None:
         try:
-            # Import slugify here to avoid adding it as a hard dependency
-            try:
-                from slugify import slugify
-            except ImportError:
-                # Fallback to simple slugification if python-slugify not available
-                def slugify(text):
-                    import re
-
-                    text = text.lower()
-                    text = re.sub(r"[^\w\s-]", "", text)
-                    text = re.sub(r"[-\s]+", "-", text)
-                    return text.strip("-")
-
             os.makedirs(log_dir, exist_ok=True)
 
             model = request.get("model", "unknown")
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
-            filename = f"{slugify(model)}_{timestamp}.json"
+            filename = f"{_slugify(model)}_{timestamp}.json"
             filepath = os.path.join(log_dir, filename)
 
             # Serialize request data
@@ -755,8 +730,8 @@ async def get_response(
         anthropic.APIConnectionError,
         anthropic.RateLimitError,
         anthropic.APIStatusError,
-        # Conditionally handle GenAI errors
-        *((genai.errors.ClientError, genai.errors.ServerError) if genai else ()),
+        genai.errors.ClientError,
+        genai.errors.ServerError,
         TypeError,
         AssertionError,
     ),
