@@ -333,6 +333,7 @@ async def get_response_genai(
             "system_instruction",
             "model",
             "thinking_budget",
+            "thinking_level",
         ]:
             if k == "max_tokens":
                 config_params["max_output_tokens"] = v
@@ -358,11 +359,16 @@ async def get_response_genai(
     if "system_instruction" in request_kwargs and request_kwargs["system_instruction"]:
         config_params["system_instruction"] = request_kwargs["system_instruction"]
 
-    # Handle thinking budget
-    if "thinking_budget" in request_kwargs:
+    # Handle thinking configuration
+    if "thinking_level" in request_kwargs:
+        config_params["thinking_config"] = genai_types.ThinkingConfig(
+            thinking_level=request_kwargs["thinking_level"],
+            include_thoughts=True,
+        )
+    elif "thinking_budget" in request_kwargs:
         config_params["thinking_config"] = genai_types.ThinkingConfig(
             thinking_budget=request_kwargs["thinking_budget"],
-            include_thoughts=True,  # Include thought summaries
+            include_thoughts=True,
         )
 
     config = (

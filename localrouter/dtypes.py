@@ -16,56 +16,99 @@ class ReasoningConfig(BaseModel):
     """Configuration for reasoning/thinking in LLMs.
 
     Can be specified either as:
-    - effort: "minimal"/"low"/"medium"/"high" (OpenAI-style)
+    - effort: "none"/"minimal"/"low"/"medium"/"high" (provider-agnostic)
     - budget_tokens: int (Anthropic/Gemini-style explicit token count)
     - dynamic: bool (Gemini-style, let model decide)
     """
 
-    effort: Optional[str] = None  # "minimal", "low", "medium", "high"
+    effort: Optional[str] = None  # "none", "minimal", "low", "medium", "high"
     budget_tokens: Optional[int] = None
     dynamic: Optional[bool] = None
 
     @field_validator("effort")
     @classmethod
     def validate_effort(cls, v):
-        if v is not None and v not in ["minimal", "low", "medium", "high"]:
+        if v is not None and v not in ["none", "minimal", "low", "medium", "high"]:
             raise ValueError(
-                f"Invalid effort level: {v}. Must be one of: minimal, low, medium, high"
+                f"Invalid effort level: {v}. Must be one of: none, minimal, low, medium, high"
             )
         return v
 
     def to_openai_format(self, model: str) -> Optional[Dict[str, Any]]:
         """Convert to OpenAI reasoning format if applicable."""
-        # GPT-5 uses reasoning.effort
-        if model and model.startswith("gpt-5"):
+        if not model:
+            return None
+
+        # GPT-5.x and o-series models support reasoning_effort
+        is_gpt5 = model.startswith("gpt-5")
+        is_o_series = (
+            model.startswith("o1") or model.startswith("o3") or model.startswith("o4")
+        )
+        if is_gpt5 or is_o_series:
             if self.effort:
-                return {"effort": self.effort}
+                effort_map = {
+                    "none": (
+                        "none" if is_gpt5 else "low"
+                    ),  # o-series doesn't support "none"
+                    "minimal": "low",
+                    "low": "low",
+                    "medium": "medium",
+                    "high": "high",
+                }
+                return {"effort": effort_map.get(self.effort, self.effort)}
             elif self.budget_tokens:
-                # Convert token budget to effort level
                 if self.budget_tokens <= 2000:
-                    return {"effort": "minimal"}
+                    return {"effort": "low"}
                 elif self.budget_tokens <= 8000:
                     return {"effort": "medium"}
                 else:
                     return {"effort": "high"}
             elif self.dynamic:
-                return {"effort": "medium"}  # Default for dynamic
-        # Other OpenAI models don't support reasoning
+                return {"effort": "medium"}
         return None
 
     def to_anthropic_format(self, model: str) -> Optional[Dict[str, Any]]:
         """Convert to Anthropic thinking format if applicable."""
-        # Support for extended thinking models: Opus 4.1, Opus 4, Sonnet 4, Sonnet 3.7
-        if model and (
+        if not model:
+            return None
+
+        if self.effort == "none":
+            return None  # No thinking
+
+        # Opus 4.6 and Sonnet 4.6: use adaptive thinking with effort parameter
+        is_adaptive = "claude-opus-4-6" in model or "claude-sonnet-4-6" in model
+        if is_adaptive:
+            effort_map = {
+                "minimal": "low",
+                "low": "low",
+                "medium": "medium",
+                "high": "high",
+            }
+            result = {"type": "adaptive"}
+            if self.effort:
+                result["effort"] = effort_map.get(self.effort, "high")
+            elif self.budget_tokens:
+                # Convert token budget to effort level
+                if self.budget_tokens <= 2000:
+                    result["effort"] = "low"
+                elif self.budget_tokens <= 8000:
+                    result["effort"] = "medium"
+                else:
+                    result["effort"] = "high"
+            return result
+
+        # Older models: manual thinking with budget_tokens
+        supports_thinking = (
             "claude-opus-4" in model
             or "claude-sonnet-4" in model
+            or "claude-haiku-4" in model
             or "claude-3-7-sonnet" in model
             or "claude-sonnet-3-7" in model
-        ):
+        )
+        if supports_thinking:
             if self.budget_tokens:
                 return {"type": "enabled", "budget_tokens": self.budget_tokens}
             elif self.effort:
-                # Convert effort to token budget
                 budget_map = {
                     "minimal": 1024,  # Anthropic minimum
                     "low": 2000,
@@ -77,22 +120,52 @@ class ReasoningConfig(BaseModel):
                     "budget_tokens": budget_map.get(self.effort, 8000),
                 }
             elif self.dynamic:
-                # Use a reasonable default for dynamic
                 return {"type": "enabled", "budget_tokens": 8000}
         return None
 
     def to_gemini_format(self, model: str) -> Optional[Dict[str, Any]]:
         """Convert to Gemini thinking format if applicable."""
-        # Gemini 2.5 models support thinking
-        if model and ("gemini-2.5" in model or "gemini-2-5" in model):
+        if not model:
+            return None
+
+        # Gemini 3.x models: use thinking_level
+        is_gemini_3 = "gemini-3" in model
+        if is_gemini_3:
+            if self.effort == "none":
+                # Gemini 3 Flash supports MINIMAL; Pro can't disable thinking
+                if "flash" in model:
+                    return {"thinking_level": "MINIMAL"}
+                return None
+            level_map = {
+                "minimal": "MINIMAL",  # Flash only, but let the API reject if needed
+                "low": "LOW",
+                "medium": "MEDIUM",
+                "high": "HIGH",
+            }
+            if self.effort:
+                return {"thinking_level": level_map.get(self.effort, "HIGH")}
+            elif self.budget_tokens:
+                if self.budget_tokens <= 2000:
+                    return {"thinking_level": "LOW"}
+                elif self.budget_tokens <= 8000:
+                    return {"thinking_level": "MEDIUM"}
+                else:
+                    return {"thinking_level": "HIGH"}
+            elif self.dynamic:
+                return {"thinking_level": "HIGH"}
+            return None
+
+        # Gemini 2.5 models: use thinking_budget
+        if "gemini-2.5" in model or "gemini-2-5" in model:
+            if self.effort == "none":
+                return {"thinking_budget": 0}
             if self.dynamic:
                 return {"thinking_budget": -1}
             elif self.budget_tokens:
                 return {"thinking_budget": self.budget_tokens}
             elif self.effort:
-                # Convert effort to token budget
                 budget_map = {
-                    "minimal": 1024,  # Anthropic minimum
+                    "minimal": 1024,
                     "low": 2000,
                     "medium": 8000,
                     "high": 16000,
@@ -129,6 +202,7 @@ class ThinkingBlock(BaseModel):
 
 class CacheControl(BaseModel):
     """Cache control for Anthropic prompt caching."""
+
     type: str = "ephemeral"
 
 
@@ -265,7 +339,9 @@ class ImageBlock(BaseModel):
         )
 
     @staticmethod
-    def _resize_image_to_fit(image_data: bytes, max_size: int, media_type: str) -> tuple[bytes, str]:
+    def _resize_image_to_fit(
+        image_data: bytes, max_size: int, media_type: str
+    ) -> tuple[bytes, str]:
         """Resize an image to fit within the max_size limit.
 
         Returns the resized image data and the media type (may change to JPEG for better compression).
@@ -290,12 +366,16 @@ class ImageBlock(BaseModel):
         current_data = image_data
 
         # If the image has alpha channel and we need to compress aggressively, convert to JPEG
-        has_alpha = img.mode in ('RGBA', 'LA', 'PA') or (img.mode == 'P' and 'transparency' in img.info)
+        has_alpha = img.mode in ("RGBA", "LA", "PA") or (
+            img.mode == "P" and "transparency" in img.info
+        )
 
         # First attempt: try reducing JPEG quality if it's a JPEG
-        if output_format.upper() == "JPEG" or (not has_alpha and len(current_data) > max_size):
+        if output_format.upper() == "JPEG" or (
+            not has_alpha and len(current_data) > max_size
+        ):
             if has_alpha:
-                img = img.convert('RGB')
+                img = img.convert("RGB")
             output_format = "JPEG"
             output_media_type = "image/jpeg"
 
@@ -322,13 +402,19 @@ class ImageBlock(BaseModel):
 
             # Try saving as JPEG first (better compression) if no alpha
             if not has_alpha:
-                rgb_img = resized_img.convert('RGB') if resized_img.mode != 'RGB' else resized_img
+                rgb_img = (
+                    resized_img.convert("RGB")
+                    if resized_img.mode != "RGB"
+                    else resized_img
+                )
                 for quality in [85, 70, 50]:
                     buffer = io.BytesIO()
                     rgb_img.save(buffer, format="JPEG", quality=quality, optimize=True)
                     current_data = buffer.getvalue()
                     if len(current_data) <= max_size:
-                        logging.info(f"Resized image from {original_size} to {(new_width, new_height)} with JPEG quality {quality}")
+                        logging.info(
+                            f"Resized image from {original_size} to {(new_width, new_height)} with JPEG quality {quality}"
+                        )
                         return current_data, "image/jpeg"
 
             # Try PNG for images with transparency
@@ -336,13 +422,18 @@ class ImageBlock(BaseModel):
             resized_img.save(buffer, format="PNG", optimize=True)
             current_data = buffer.getvalue()
             if len(current_data) <= max_size:
-                logging.info(f"Resized image from {original_size} to {(new_width, new_height)} as PNG")
+                logging.info(
+                    f"Resized image from {original_size} to {(new_width, new_height)} as PNG"
+                )
                 return current_data, "image/png"
 
         # Last resort: very small JPEG
         if not has_alpha:
-            tiny_img = img.resize((100, int(100 * original_size[1] / original_size[0])), Image.Resampling.LANCZOS)
-            tiny_img = tiny_img.convert('RGB')
+            tiny_img = img.resize(
+                (100, int(100 * original_size[1] / original_size[0])),
+                Image.Resampling.LANCZOS,
+            )
+            tiny_img = tiny_img.convert("RGB")
             buffer = io.BytesIO()
             tiny_img.save(buffer, format="JPEG", quality=30, optimize=True)
             current_data = buffer.getvalue()
@@ -369,16 +460,20 @@ class ImageBlock(BaseModel):
 
         # Image exceeds limit, resize it
         image_data = base64.b64decode(self.source.data)
-        logging.info(f"Image base64 size ({base64_size} bytes) exceeds Anthropic limit ({self.ANTHROPIC_MAX_BASE64_SIZE} bytes), resizing...")
+        logging.info(
+            f"Image base64 size ({base64_size} bytes) exceeds Anthropic limit ({self.ANTHROPIC_MAX_BASE64_SIZE} bytes), resizing..."
+        )
 
         resized_data, new_media_type = self._resize_image_to_fit(
             image_data,
             self.ANTHROPIC_MAX_DECODED_SIZE,  # Target smaller decoded size to account for base64 overhead
-            self.source.media_type
+            self.source.media_type,
         )
 
         new_base64 = base64.b64encode(resized_data).decode("utf-8")
-        logging.info(f"Resized image: decoded {len(image_data)} -> {len(resized_data)} bytes, base64 {base64_size} -> {len(new_base64)} bytes")
+        logging.info(
+            f"Resized image: decoded {len(image_data)} -> {len(resized_data)} bytes, base64 {base64_size} -> {len(new_base64)} bytes"
+        )
 
         result = {
             "type": "image",
@@ -386,7 +481,7 @@ class ImageBlock(BaseModel):
                 "type": "base64",
                 "media_type": new_media_type,
                 "data": new_base64,
-            }
+            },
         }
         if self.cache_control:
             result["cache_control"] = self.cache_control.model_dump()
@@ -406,7 +501,9 @@ class ToolUseBlock(BaseModel):
     name: str
     type: str = "tool_use"
     meta: Dict[str, Any] = Field(default_factory=dict)
-    thought_signature: Optional[str] = None  # For Gemini thought signatures (base64 encoded)
+    thought_signature: Optional[str] = (
+        None  # For Gemini thought signatures (base64 encoded)
+    )
     cache_control: Optional[CacheControl] = None
 
     def anthropic_format(self) -> Dict[str, Any]:
@@ -455,8 +552,8 @@ class ToolResultBlock(BaseModel):
             if isinstance(item, (TextBlock, ImageBlock)):
                 result.append(item)
             elif isinstance(item, dict):
-                block_type = item.get('type', 'text')
-                if block_type == 'image':
+                block_type = item.get("type", "text")
+                if block_type == "image":
                     result.append(ImageBlock(**item))
                 else:
                     result.append(TextBlock(**item))
@@ -536,34 +633,37 @@ class ChatMessage(BaseModel):
         """Convert raw dicts to proper ContentBlock types based on 'type' field"""
         if not isinstance(v, list):
             return v
-        
+
         result = []
         for item in v:
             # If it's already a proper block type, keep it
-            if isinstance(item, (TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock)):
+            if isinstance(
+                item,
+                (TextBlock, ImageBlock, ToolUseBlock, ToolResultBlock, ThinkingBlock),
+            ):
                 result.append(item)
                 continue
-            
+
             # If it's a dict, reconstruct the proper type
             if isinstance(item, dict):
-                block_type = item.get('type', 'text')
-                if block_type == 'thinking':
+                block_type = item.get("type", "text")
+                if block_type == "thinking":
                     result.append(ThinkingBlock(**item))
-                elif block_type == 'text':
+                elif block_type == "text":
                     result.append(TextBlock(**item))
-                elif block_type == 'image':
+                elif block_type == "image":
                     result.append(ImageBlock(**item))
-                elif block_type == 'tool_use':
+                elif block_type == "tool_use":
                     result.append(ToolUseBlock(**item))
-                elif block_type == 'tool_result':
+                elif block_type == "tool_result":
                     result.append(ToolResultBlock(**item))
                 else:
                     # Fallback to text block for unknown types
-                    result.append(TextBlock(text=str(item), type='text'))
+                    result.append(TextBlock(text=str(item), type="text"))
             else:
                 # If it's something else, convert to text
-                result.append(TextBlock(text=str(item), type='text'))
-        
+                result.append(TextBlock(text=str(item), type="text"))
+
         return result
 
     def anthropic_format(self):  # -> dict[str, Any]
@@ -769,26 +869,32 @@ class ChatMessage(BaseModel):
                         blocks.append(ThinkingBlock(thinking=part.text))
                     elif hasattr(part, "text") and part.text:
                         blocks.append(TextBlock(text=part.text))
-                    
+
                     # Check for function calls with thought signatures
                     if hasattr(part, "function_call") and part.function_call:
                         func_call = part.function_call
                         func_id = getattr(func_call, "id", None) or str(uuid4())
                         func_args = getattr(func_call, "args", {})
-                        
+
                         # Extract thought signature if present (stored as bytes)
                         thought_signature = None
-                        if hasattr(part, "thought_signature") and part.thought_signature:
+                        if (
+                            hasattr(part, "thought_signature")
+                            and part.thought_signature
+                        ):
                             import base64
+
                             # Convert bytes to base64 string for serialization
-                            thought_signature = base64.b64encode(part.thought_signature).decode('utf-8')
-                        
+                            thought_signature = base64.b64encode(
+                                part.thought_signature
+                            ).decode("utf-8")
+
                         blocks.append(
                             ToolUseBlock(
-                                id=func_id, 
-                                name=func_call.name, 
+                                id=func_id,
+                                name=func_call.name,
                                 input=func_args,
-                                thought_signature=thought_signature
+                                thought_signature=thought_signature,
                             )
                         )
 
@@ -967,7 +1073,7 @@ class PromptTemplate(BaseModel):
 
 def anthropic_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any]:
     """Convert our internal chat representation into a payload suitable for Anthropic.
-    
+
     Supports Anthropic's prompt caching by:
     - Using structured system message format (array of content blocks)
     - Preserving cache_control on system message blocks, tools, and message content
@@ -979,11 +1085,11 @@ def anthropic_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any
         # Convert system message to structured format for caching support
         # Check if any block has cache_control - if so, use structured format
         has_cache_control = any(
-            getattr(block, 'cache_control', None) is not None
+            getattr(block, "cache_control", None) is not None
             for block in messages[0].content
             if isinstance(block, TextBlock)
         )
-        
+
         if has_cache_control:
             # Use structured array format with cache_control
             system_blocks = []
@@ -1020,12 +1126,19 @@ def anthropic_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any
         model = kwargs.get("model", "")
         thinking_config = reasoning.to_anthropic_format(model)
         if thinking_config:
-            kwargs["thinking"] = thinking_config
-        if kwargs.get("temperature", 1) != 1:
-            logging.warning(
-                f"Anthropic models require temperature to be 1 when thinking is enabled. Overwriting given temperature."
-            )
-            kwargs["temperature"] = 1
+            if thinking_config.get("type") == "adaptive":
+                # Adaptive thinking: effort goes in output_config
+                effort = thinking_config.pop("effort", None)
+                kwargs["thinking"] = thinking_config
+                if effort:
+                    kwargs["output_config"] = {"effort": effort}
+            else:
+                kwargs["thinking"] = thinking_config
+            if kwargs.get("temperature", 1) != 1:
+                logging.warning(
+                    f"Anthropic models require temperature to be 1 when thinking is enabled. Overwriting given temperature."
+                )
+                kwargs["temperature"] = 1
 
     return kwargs
 
@@ -1117,15 +1230,16 @@ def genai_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any]:
                 # For Gemini, we need to reconstruct the Part with thought_signature if present
                 if block.thought_signature:
                     import base64
+
                     # Decode the base64 signature back to bytes
                     signature_bytes = base64.b64decode(block.thought_signature)
                     # Create Part with signature using model_validate
                     part_dict = {
                         "function_call": {
                             "name": block.name,
-                            "args": block.input or {}
+                            "args": block.input or {},
                         },
-                        "thought_signature": signature_bytes
+                        "thought_signature": signature_bytes,
                     }
                     parts.append(genai_types.Part.model_validate(part_dict))
                 else:
@@ -1183,7 +1297,10 @@ def genai_format(messages, tools, reasoning=None, **kwargs) -> Dict[str, Any]:
         model = kwargs.get("model", "gemini-2.5-pro")
         thinking_config = reasoning.to_gemini_format(model)
         if thinking_config:
-            request["thinking_budget"] = thinking_config["thinking_budget"]
+            if "thinking_level" in thinking_config:
+                request["thinking_level"] = thinking_config["thinking_level"]
+            elif "thinking_budget" in thinking_config:
+                request["thinking_budget"] = thinking_config["thinking_budget"]
 
     return request
 
