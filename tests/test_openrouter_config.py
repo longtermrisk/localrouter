@@ -23,22 +23,24 @@ class TestDeepMerge:
     def test_nested_merge(self):
         base = {
             "openrouter": {
-                "providers": {"qwen": {"only": ["alibaba"], "allow_fallbacks": False}}
+                "providers": {
+                    "qwen": {"order": ["alibaba"], "require_parameters": True}
+                }
             }
         }
         override = {
-            "openrouter": {"providers": {"qwen": {"only": ["alibaba", "deepinfra"]}}}
+            "openrouter": {"providers": {"qwen": {"order": ["alibaba", "deepinfra"]}}}
         }
         result = _deep_merge(base, override)
-        assert result["openrouter"]["providers"]["qwen"]["only"] == [
+        assert result["openrouter"]["providers"]["qwen"]["order"] == [
             "alibaba",
             "deepinfra",
         ]
-        assert result["openrouter"]["providers"]["qwen"]["allow_fallbacks"] is False
+        assert result["openrouter"]["providers"]["qwen"]["require_parameters"] is True
 
     def test_add_new_key(self):
-        base = {"openrouter": {"providers": {"qwen": {"only": ["alibaba"]}}}}
-        override = {"openrouter": {"providers": {"meta-llama": {"only": ["meta"]}}}}
+        base = {"openrouter": {"providers": {"qwen": {"order": ["alibaba"]}}}}
+        override = {"openrouter": {"providers": {"meta-llama": {"order": ["meta"]}}}}
         result = _deep_merge(base, override)
         assert "qwen" in result["openrouter"]["providers"]
         assert "meta-llama" in result["openrouter"]["providers"]
@@ -51,42 +53,79 @@ class TestDeepMerge:
 
 
 class TestDefaultProviders:
+    """Verify built-in defaults use 'order' for orgs with official providers
+    and just 'require_parameters' for orgs without."""
+
     def test_qwen_defaults(self):
-        assert _DEFAULT_OPENROUTER_PROVIDERS["qwen"]["only"] == ["alibaba"]
-        assert _DEFAULT_OPENROUTER_PROVIDERS["qwen"]["allow_fallbacks"] is False
+        assert _DEFAULT_OPENROUTER_PROVIDERS["qwen"]["order"] == ["alibaba"]
         assert _DEFAULT_OPENROUTER_PROVIDERS["qwen"]["require_parameters"] is True
+        assert "only" not in _DEFAULT_OPENROUTER_PROVIDERS["qwen"]
 
     def test_deepseek_defaults(self):
-        assert _DEFAULT_OPENROUTER_PROVIDERS["deepseek"]["only"] == ["deepseek"]
-
-    def test_minimax_defaults(self):
-        assert _DEFAULT_OPENROUTER_PROVIDERS["minimax"]["only"] == ["minimax"]
+        assert _DEFAULT_OPENROUTER_PROVIDERS["deepseek"]["order"] == ["deepseek"]
+        assert _DEFAULT_OPENROUTER_PROVIDERS["deepseek"]["require_parameters"] is True
 
     def test_xai_defaults(self):
-        assert _DEFAULT_OPENROUTER_PROVIDERS["x-ai"]["only"] == ["xai"]
-
-    def test_moonshotai_defaults(self):
-        assert _DEFAULT_OPENROUTER_PROVIDERS["moonshotai"]["only"] == ["moonshotai"]
+        assert _DEFAULT_OPENROUTER_PROVIDERS["x-ai"]["order"] == ["xai"]
+        assert _DEFAULT_OPENROUTER_PROVIDERS["x-ai"]["require_parameters"] is True
 
     def test_mistralai_defaults(self):
-        assert _DEFAULT_OPENROUTER_PROVIDERS["mistralai"]["only"] == ["mistral"]
+        assert _DEFAULT_OPENROUTER_PROVIDERS["mistralai"]["order"] == ["mistral"]
+        assert _DEFAULT_OPENROUTER_PROVIDERS["mistralai"]["require_parameters"] is True
+
+    def test_moonshotai_defaults_no_official_provider(self):
+        assert "order" not in _DEFAULT_OPENROUTER_PROVIDERS["moonshotai"]
+        assert "only" not in _DEFAULT_OPENROUTER_PROVIDERS["moonshotai"]
+        assert _DEFAULT_OPENROUTER_PROVIDERS["moonshotai"]["require_parameters"] is True
+
+    def test_minimax_defaults_no_official_provider(self):
+        assert "order" not in _DEFAULT_OPENROUTER_PROVIDERS["minimax"]
+        assert "only" not in _DEFAULT_OPENROUTER_PROVIDERS["minimax"]
+        assert _DEFAULT_OPENROUTER_PROVIDERS["minimax"]["require_parameters"] is True
+
+    def test_zai_defaults_no_official_provider(self):
+        assert "order" not in _DEFAULT_OPENROUTER_PROVIDERS["z-ai"]
+        assert "only" not in _DEFAULT_OPENROUTER_PROVIDERS["z-ai"]
+        assert _DEFAULT_OPENROUTER_PROVIDERS["z-ai"]["require_parameters"] is True
 
 
 class TestGetOpenrouterProviderPrefs:
-    def test_known_model(self):
+    def test_qwen_model(self):
         prefs = _get_openrouter_provider_prefs("qwen/qwen3-coder")
         assert prefs is not None
-        assert prefs["only"] == ["alibaba"]
+        assert prefs["order"] == ["alibaba"]
+        assert prefs["require_parameters"] is True
 
     def test_deepseek_model(self):
         prefs = _get_openrouter_provider_prefs("deepseek/deepseek-v3.2")
         assert prefs is not None
-        assert prefs["only"] == ["deepseek"]
+        assert prefs["order"] == ["deepseek"]
 
     def test_xai_model(self):
         prefs = _get_openrouter_provider_prefs("x-ai/grok-4")
         assert prefs is not None
-        assert prefs["only"] == ["xai"]
+        assert prefs["order"] == ["xai"]
+
+    def test_moonshotai_kimi_k2_5(self):
+        """Regression: moonshotai/kimi-k2.5 must not 404."""
+        prefs = _get_openrouter_provider_prefs("moonshotai/kimi-k2.5")
+        assert prefs is not None
+        assert "only" not in prefs
+        assert prefs["require_parameters"] is True
+
+    def test_minimax_m2_5(self):
+        """Regression: minimax/minimax-m2.5 must not 404."""
+        prefs = _get_openrouter_provider_prefs("minimax/minimax-m2.5")
+        assert prefs is not None
+        assert "only" not in prefs
+        assert prefs["require_parameters"] is True
+
+    def test_zai_glm5(self):
+        """Regression: z-ai/glm-5 must not 404."""
+        prefs = _get_openrouter_provider_prefs("z-ai/glm-5")
+        assert prefs is not None
+        assert "only" not in prefs
+        assert prefs["require_parameters"] is True
 
     def test_unknown_org_returns_none(self):
         prefs = _get_openrouter_provider_prefs("meta-llama/llama-3.3-70b")
@@ -103,23 +142,21 @@ class TestLoadConfig:
             config = _load_config()
         assert "qwen" in config["openrouter"]["providers"]
         assert "deepseek" in config["openrouter"]["providers"]
+        assert "moonshotai" in config["openrouter"]["providers"]
+        assert "minimax" in config["openrouter"]["providers"]
+        assert "z-ai" in config["openrouter"]["providers"]
 
     def test_global_config_overrides_defaults(self):
         yaml_content = """
 openrouter:
   providers:
     qwen:
-      only: ["alibaba", "deepinfra"]
+      order: ["alibaba", "deepinfra"]
 """
         with tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as f:
             f.write(yaml_content)
             f.flush()
             temp_path = f.name
-
-        def exists_side_effect(path):
-            if "/.localrouter.yaml" in path and "~" not in path:
-                return path == temp_path
-            return path == temp_path
 
         try:
             with (
@@ -128,12 +165,14 @@ openrouter:
                 patch("os.getcwd", return_value="/nonexistent"),
             ):
                 config = _load_config()
-            assert config["openrouter"]["providers"]["qwen"]["only"] == [
+            assert config["openrouter"]["providers"]["qwen"]["order"] == [
                 "alibaba",
                 "deepinfra",
             ]
             # Other defaults still present
-            assert config["openrouter"]["providers"]["deepseek"]["only"] == ["deepseek"]
+            assert config["openrouter"]["providers"]["deepseek"]["order"] == [
+                "deepseek"
+            ]
         finally:
             os.unlink(temp_path)
 
@@ -142,13 +181,13 @@ openrouter:
 openrouter:
   providers:
     qwen:
-      only: ["alibaba"]
+      order: ["alibaba"]
 """
         local_yaml = """
 openrouter:
   providers:
     qwen:
-      only: ["deepinfra"]
+      order: ["deepinfra"]
 """
         with (
             tempfile.NamedTemporaryFile(mode="w", suffix=".yaml", delete=False) as gf,
@@ -169,7 +208,7 @@ openrouter:
                 patch("os.getcwd", return_value="/tmp"),
             ):
                 config = _load_config()
-            assert config["openrouter"]["providers"]["qwen"]["only"] == ["deepinfra"]
+            assert config["openrouter"]["providers"]["qwen"]["order"] == ["deepinfra"]
         finally:
             os.unlink(global_path)
             os.unlink(local_path)
@@ -179,7 +218,7 @@ class TestExtraBodyInjection:
     """Test that get_response_factory injects extra_body when extra_body_fn is provided."""
 
     @pytest.mark.asyncio
-    async def test_extra_body_injected(self):
+    async def test_extra_body_injected_with_order(self):
         mock_client = MagicMock()
         mock_response = MagicMock()
         mock_response.choices = [MagicMock()]
@@ -194,7 +233,12 @@ class TestExtraBodyInjection:
 
         def my_extra_body_fn(model):
             if model.startswith("qwen/"):
-                return {"provider": {"only": ["alibaba"], "allow_fallbacks": False}}
+                return {
+                    "provider": {
+                        "order": ["alibaba"],
+                        "require_parameters": True,
+                    }
+                }
             return None
 
         factory_fn = get_response_factory(mock_client, extra_body_fn=my_extra_body_fn)
@@ -206,12 +250,40 @@ class TestExtraBodyInjection:
         await factory_fn(messages=messages, tools=None, model="qwen/qwen3-coder")
 
         call_kwargs = mock_client.chat.completions.create.call_args
-        assert "extra_body" in call_kwargs.kwargs or "extra_body" in (
-            call_kwargs[1] if len(call_kwargs) > 1 else {}
-        )
-        # Check the actual kwargs passed
         all_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
-        assert all_kwargs["extra_body"]["provider"]["only"] == ["alibaba"]
+        assert all_kwargs["extra_body"]["provider"]["order"] == ["alibaba"]
+        assert all_kwargs["extra_body"]["provider"]["require_parameters"] is True
+
+    @pytest.mark.asyncio
+    async def test_extra_body_injected_require_parameters_only(self):
+        """For orgs without official providers, only require_parameters is set."""
+        mock_client = MagicMock()
+        mock_response = MagicMock()
+        mock_response.choices = [MagicMock()]
+        mock_response.choices[0].message = MagicMock(
+            role="assistant",
+            content="hello",
+            tool_calls=None,
+            refusal=None,
+        )
+
+        mock_client.chat.completions.create = AsyncMock(return_value=mock_response)
+
+        def my_extra_body_fn(model):
+            return {"provider": {"require_parameters": True}}
+
+        factory_fn = get_response_factory(mock_client, extra_body_fn=my_extra_body_fn)
+
+        from localrouter import ChatMessage, MessageRole, TextBlock
+
+        messages = [ChatMessage(role=MessageRole.user, content=[TextBlock(text="hi")])]
+
+        await factory_fn(messages=messages, tools=None, model="moonshotai/kimi-k2.5")
+
+        call_kwargs = mock_client.chat.completions.create.call_args
+        all_kwargs = call_kwargs.kwargs if call_kwargs.kwargs else call_kwargs[1]
+        assert all_kwargs["extra_body"]["provider"]["require_parameters"] is True
+        assert "only" not in all_kwargs["extra_body"]["provider"]
 
     @pytest.mark.asyncio
     async def test_no_extra_body_for_unknown_model(self):

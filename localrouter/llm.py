@@ -46,36 +46,40 @@ from .dtypes import (
 # Config loading (global ~/.localrouter.yaml, local .localrouter.yaml)
 # ---------------------------------------------------------------------------
 
-# Built-in defaults: route to official/first-party providers only
+# Built-in defaults: prefer official/first-party providers, require parameter support.
+# Uses "order" (preference) rather than "only" (restriction) because not every model
+# org has their official API available on OpenRouter for all of their models.
 _DEFAULT_OPENROUTER_PROVIDERS: Dict[str, Dict[str, Any]] = {
+    # Official provider available on OpenRouter
     "qwen": {
-        "only": ["alibaba"],
-        "allow_fallbacks": False,
+        "order": ["alibaba"],
         "require_parameters": True,
     },
+    # Official provider only hosts deepseek-v3.2; other models via third parties
     "deepseek": {
-        "only": ["deepseek"],
-        "allow_fallbacks": False,
+        "order": ["deepseek"],
         "require_parameters": True,
     },
-    "minimax": {
-        "only": ["minimax"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    },
+    # Official provider available on OpenRouter
     "x-ai": {
-        "only": ["xai"],
-        "allow_fallbacks": False,
+        "order": ["xai"],
         "require_parameters": True,
     },
-    "moonshotai": {
-        "only": ["moonshotai"],
-        "allow_fallbacks": False,
-        "require_parameters": True,
-    },
+    # Official provider available on OpenRouter
     "mistralai": {
-        "only": ["mistral"],
-        "allow_fallbacks": False,
+        "order": ["mistral"],
+        "require_parameters": True,
+    },
+    # No official provider on OpenRouter — just require parameter support
+    "moonshotai": {
+        "require_parameters": True,
+    },
+    # No official provider on OpenRouter
+    "minimax": {
+        "require_parameters": True,
+    },
+    # No official provider on OpenRouter (Zhipu AI)
+    "z-ai": {
         "require_parameters": True,
     },
 }
