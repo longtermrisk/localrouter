@@ -569,7 +569,7 @@ if "OPENAI_API_KEY" in os.environ:
         _available_openai_models = [
             m.id
             for m in openai.OpenAI().models.list().data
-            if m.id.startswith("gpt") or m.id.startswith("o")
+            if m.id.startswith("gpt") or m.id.startswith("o") or m.id.startswith("ft")
         ]
         providers.append(
             Provider(
