@@ -27,6 +27,7 @@ from pydantic import BaseModel
 from cache_on_disk import DCache
 from .dtypes import (
     ChatMessage,
+    ImageBlock,
     MessageRole,
     anthropic_format,
     openai_format,
@@ -36,6 +37,30 @@ from .dtypes import (
     ReasoningConfig,
     ThinkingBlock,
 )
+
+
+def _messages_have_images(messages: List[ChatMessage]) -> bool:
+    return any(
+        any(isinstance(block, ImageBlock) for block in message.content)
+        for message in messages
+    )
+
+
+def _with_openai_image_detail(
+    messages: List[ChatMessage], detail: str
+) -> List[ChatMessage]:
+    updated_messages = []
+    for message in messages:
+        updated_blocks = []
+        for block in message.content:
+            if isinstance(block, ImageBlock):
+                meta = dict(block.meta)
+                meta["openai_detail"] = detail
+                updated_blocks.append(block.model_copy(update={"meta": meta}))
+            else:
+                updated_blocks.append(block)
+        updated_messages.append(message.model_copy(update={"content": updated_blocks}))
+    return updated_messages
 
 
 # ---------------------------------------------------------------------------
@@ -407,6 +432,10 @@ async def get_response_genai(
 
 providers: List[Provider] = []
 
+_OPENAI_ALIAS_PATTERNS = [
+    re.compile(r"gpt-5(\..+)?$"),
+]
+
 # ---------------------------------------------------------------------------
 # Router registration
 # ---------------------------------------------------------------------------
@@ -571,6 +600,7 @@ if "OPENAI_API_KEY" in os.environ:
             for m in openai.OpenAI().models.list().data
             if m.id.startswith("gpt") or m.id.startswith("o") or m.id.startswith("ft")
         ]
+        _available_openai_models.extend(_OPENAI_ALIAS_PATTERNS)
         providers.append(
             Provider(
                 get_response_factory(openai.AsyncOpenAI()),
@@ -700,6 +730,17 @@ async def get_response(
             response = await provider.get_response(
                 model=model,
                 messages=messages,
+                tools=tools,
+                response_format=response_format,
+                reasoning=reasoning,
+                **kwargs,
+            )
+
+        if len(response.content) == 0 and _messages_have_images(messages):
+            low_detail_messages = _with_openai_image_detail(messages, "low")
+            response = await provider.get_response(
+                model=model,
+                messages=low_detail_messages,
                 tools=tools,
                 response_format=response_format,
                 reasoning=reasoning,
@@ -963,6 +1004,7 @@ async def get_response_cached_with_backoff(
 async def register_openai_client(oai):
     models = await oai.models.list()
     _available_openai_models = [pretty_name(m.id) for m in models.data]
+    _available_openai_models.extend(_OPENAI_ALIAS_PATTERNS)
     providers.append(
         Provider(
             get_response_factory(oai),

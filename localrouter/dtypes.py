@@ -324,7 +324,8 @@ class ImageBlock(BaseModel):
         data: str, media_type: str = "image/png", meta=None
     ) -> "ImageBlock":
         return ImageBlock(
-            source=Base64ImageSource(data=data, media_type=media_type, meta=meta)
+            source=Base64ImageSource(data=data, media_type=media_type),
+            meta=meta or {},
         )
 
     @staticmethod
@@ -335,7 +336,8 @@ class ImageBlock(BaseModel):
             data = f.read()
         base64_data = base64.b64encode(data).decode("utf-8")
         return ImageBlock(
-            source=Base64ImageSource(data=base64_data, media_type=media_type, meta=meta)
+            source=Base64ImageSource(data=base64_data, media_type=media_type),
+            meta=meta or {},
         )
 
     @staticmethod
@@ -489,7 +491,11 @@ class ImageBlock(BaseModel):
 
     def openai_format(self) -> Dict[str, Any]:
         data_url = f"data:{self.source.media_type};base64,{self.source.data}"
-        return {"type": "image_url", "image_url": {"url": data_url}}
+        image_url = {"url": data_url}
+        detail = self.meta.get("openai_detail") or self.meta.get("detail")
+        if detail:
+            image_url["detail"] = detail
+        return {"type": "image_url", "image_url": image_url}
 
     def xml_format(self) -> str:
         return {"type": "text", "text": "(image)"}
@@ -787,10 +793,33 @@ class ChatMessage(BaseModel):
             else:
                 # Multi-modal response
                 for part in message.content:
-                    if part["type"] == "text":
-                        blocks.append(TextBlock(text=part["text"]))
-                    elif part["type"] == "image_url":
-                        url = part["image_url"]["url"]
+                    part_type = (
+                        part.get("type")
+                        if isinstance(part, dict)
+                        else getattr(part, "type", None)
+                    )
+
+                    if part_type == "text":
+                        text = (
+                            part.get("text")
+                            if isinstance(part, dict)
+                            else getattr(part, "text", None)
+                        )
+                        if text:
+                            blocks.append(TextBlock(text=text))
+                    elif part_type == "image_url":
+                        image_url = (
+                            part.get("image_url")
+                            if isinstance(part, dict)
+                            else getattr(part, "image_url", None)
+                        )
+                        url = (
+                            image_url.get("url")
+                            if isinstance(image_url, dict)
+                            else getattr(image_url, "url", None)
+                        )
+                        if not url:
+                            continue
                         if url.startswith("data:"):
                             header, b64_data = url.split(",", 1)
                             media_type = header[len("data:") : header.index(";")]
@@ -799,6 +828,11 @@ class ChatMessage(BaseModel):
                                     data=b64_data, media_type=media_type
                                 )
                             )
+
+        refusal = getattr(message, "refusal", None)
+        if refusal:
+            blocks.append(TextBlock(text=refusal))
+            meta["refusal"] = True
 
         # Handle tool calls
         if hasattr(message, "tool_calls") and message.tool_calls:

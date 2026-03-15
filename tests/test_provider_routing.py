@@ -177,6 +177,19 @@ async def test_model_not_found_error():
     assert "not supported by any provider" in error_msg
 
 
+def test_openai_alias_pattern_matches_gpt_5_dot_aliases():
+    provider = Provider(
+        AsyncMock(),
+        models=[re.compile(r"gpt-5(\..+)?$")],
+        priority=10,
+    )
+
+    assert provider.supports_model("gpt-5")
+    assert provider.supports_model("gpt-5.4")
+    assert provider.supports_model("gpt-5.4-mini")
+    assert not provider.supports_model("meta-llama/llama-3.3-70b")
+
+
 if __name__ == "__main__":
     import asyncio
 
