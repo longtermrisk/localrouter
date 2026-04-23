@@ -75,8 +75,15 @@ class ReasoningConfig(BaseModel):
         if self.effort == "none":
             return None  # No thinking
 
-        # Opus 4.6 and Sonnet 4.6: use adaptive thinking with effort parameter
-        is_adaptive = "claude-opus-4-6" in model or "claude-sonnet-4-6" in model
+        # Opus/Sonnet 4.6 and 4.7: use adaptive thinking with effort parameter
+        adaptive_models = (
+            "claude-opus-4-6",
+            "claude-sonnet-4-6",
+            "claude-opus-4-7",
+            "claude-sonnet-4-7",
+            "claude-haiku-4-7",
+        )
+        is_adaptive = any(tag in model for tag in adaptive_models)
         if is_adaptive:
             effort_map = {
                 "minimal": "low",
